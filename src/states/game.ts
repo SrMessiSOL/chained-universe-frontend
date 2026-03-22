@@ -5,6 +5,7 @@
  */
 
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import { Buffer } from "buffer";
 import { AnchorProvider, Program, BN, Idl } from "@coral-xyz/anchor";
 import {
   InitializeNewWorld,
