@@ -35,16 +35,26 @@ export default function App() {
 
   // Build client when wallet connects
   useEffect(() => {
-    if (!wallet || !connected) { clientRef.current = null; return; }
+    if (!wallet || !connected || !publicKey) {
+      clientRef.current = null;
+      setAddresses(null);
+      setPlanet(null);
+      setResources(null);
+      setFleet(null);
+      return;
+    }
     const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
     clientRef.current = new SolarGridClient(connection, provider);
 
-    // Try to load saved addresses
-    const saved = clientRef.current.loadAddresses();
-    if (saved) {
-      setAddresses(saved);
+    // Load per-wallet saved addresses
+    const saved = clientRef.current.loadAddresses(publicKey);
+    setAddresses(saved || null);
+    if (!saved) {
+      setPlanet(null);
+      setResources(null);
+      setFleet(null);
     }
-  }, [wallet, connected, connection]);
+  }, [wallet, connected, publicKey, connection]);
 
   // Poll chain state every 5 seconds
   useEffect(() => {
@@ -104,6 +114,7 @@ export default function App() {
         setStatus("✅ Ready!");
       }, 2000);
     } catch (e: any) {
+      console.error("handleInit error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
@@ -125,6 +136,7 @@ export default function App() {
         if (r) setResources(r);
       }, 2000);
     } catch (e: any) {
+      console.error("handleBuild error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
@@ -145,6 +157,7 @@ export default function App() {
         if (r) setResources(r);
       }, 2000);
     } catch (e: any) {
+      console.error("handleFinishBuild error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
@@ -166,6 +179,7 @@ export default function App() {
         if (r) setResources(r);
       }, 2000);
     } catch (e: any) {
+      console.error("handleBuildShip error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);

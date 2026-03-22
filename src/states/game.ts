@@ -5,6 +5,7 @@
  */
 
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import { Buffer } from "buffer";
 import { AnchorProvider, Program, BN, Idl } from "@coral-xyz/anchor";
 import {
   InitializeNewWorld,
@@ -40,7 +41,7 @@ const PLANET_IDL: Idl = {
     type: {
       kind: "struct" as const,
       fields: [
-        { name: "owner",                type: "publicKey" },
+        { name: "owner",                type: "pubkey" },
         { name: "name",                 type: { array: ["u8", 32] } },
         { name: "galaxy",               type: "u16" },
         { name: "system",               type: "u16" },
@@ -70,7 +71,7 @@ const PLANET_IDL: Idl = {
     },
   }, {
     name: "BoltMetadata",
-    type: { kind: "struct" as const, fields: [{ name: "authority", type: "publicKey" }] },
+    type: { kind: "struct" as const, fields: [{ name: "authority", type: "pubkey" }] },
   }],
 } as unknown as Idl;
 
@@ -101,7 +102,7 @@ const RESOURCES_IDL: Idl = {
     },
   }, {
     name: "BoltMetadata",
-    type: { kind: "struct" as const, fields: [{ name: "authority", type: "publicKey" }] },
+    type: { kind: "struct" as const, fields: [{ name: "authority", type: "pubkey" }] },
   }],
 } as unknown as Idl;
 
@@ -140,7 +141,7 @@ const FLEET_IDL: Idl = {
       kind: "struct" as const,
       fields: [
         { name: "missionType",     type: "u8" },
-        { name: "destination",     type: "publicKey" },
+        { name: "destination",     type: "pubkey" },
         { name: "departTs",        type: "i64" },
         { name: "arriveTs",        type: "i64" },
         { name: "returnTs",        type: "i64" },
@@ -165,7 +166,7 @@ const FLEET_IDL: Idl = {
     },
   }, {
     name: "BoltMetadata",
-    type: { kind: "struct" as const, fields: [{ name: "authority", type: "publicKey" }] },
+    type: { kind: "struct" as const, fields: [{ name: "authority", type: "pubkey" }] },
   }],
 } as unknown as Idl;
 
@@ -267,6 +268,10 @@ export class SolarGridClient {
     this.fleetProgram     = new Program(FLEET_IDL,     provider);
   }
 
+  private storageKey(owner: PublicKey): string {
+    return `solargrid_addresses_${owner.toBase58()}`;
+  }
+
   // ── Setup ──────────────────────────────────────────────────────────────────
 
   async initializeWorld(): Promise<GameAddresses> {
@@ -303,7 +308,7 @@ export class SolarGridClient {
     const addresses = { worldPda, entityPda, planetPda, resourcesPda, fleetPda };
 
     // Save to localStorage
-    localStorage.setItem("solargrid_addresses", JSON.stringify({
+    localStorage.setItem(this.storageKey(payer), JSON.stringify({
       worldPda:     worldPda.toBase58(),
       entityPda:    entityPda.toBase58(),
       planetPda:    planetPda.toBase58(),
@@ -314,9 +319,9 @@ export class SolarGridClient {
     return addresses;
   }
 
-  loadAddresses(): GameAddresses | null {
+  loadAddresses(owner: PublicKey): GameAddresses | null {
     try {
-      const saved = localStorage.getItem("solargrid_addresses");
+      const saved = localStorage.getItem(this.storageKey(owner));
       if (!saved) return null;
       const parsed = JSON.parse(saved);
       return {
