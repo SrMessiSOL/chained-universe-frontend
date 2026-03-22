@@ -185,6 +185,23 @@ export default function App() {
     setLoading(false);
   }, [addresses]);
 
+
+  const handleSettleProduction = useCallback(async () => {
+    if (!clientRef.current || !addresses) return;
+    setLoading(true);
+    setStatus("Settling production...");
+    try {
+      const sig = await clientRef.current.settleProduction(addresses.entityPda);
+      const r = await clientRef.current.fetchResources(addresses.resourcesPda);
+      if (r) setResources(r);
+      setStatus(`✅ Production settled! Tx: ${sig.slice(0,8)}…`);
+    } catch (e: any) {
+      console.error("handleSettleProduction error:", e);
+      setStatus("❌ " + (e.message || String(e)));
+    }
+    setLoading(false);
+  }, [addresses]);
+
   const energy = resources ? resources.energyProduction - resources.energyConsumption : 0;
   const displayRes = resources ? liveRes : { metal: 0, crystal: 0, deuterium: 0 };
 
@@ -237,6 +254,11 @@ export default function App() {
         {!addresses && connected && (
           <button onClick={handleInit} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,212,255,0.1)", border:"1px solid var(--accent)", color:"var(--accent)", cursor:"pointer" }}>
             {loading ? "⟳ INITIALIZING..." : "⚡ INIT ON-CHAIN"}
+          </button>
+        )}
+        {addresses && connected && (
+          <button onClick={handleSettleProduction} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,255,163,0.08)", border:"1px solid var(--accent3)", color:"var(--accent3)", cursor:"pointer" }}>
+            {loading ? "⟳ SETTLING..." : "⛏ SYNC PRODUCTION"}
           </button>
         )}
       </div>
