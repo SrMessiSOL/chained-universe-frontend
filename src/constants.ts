@@ -12,6 +12,7 @@ export const SYSTEM_SHIPYARD_ID     = new PublicKey("FTav8UK4RKawqyGWRakZhe1zhYV
 export const SYSTEM_ATTACK_ID       = new PublicKey("8qbBLEdrN6qC1fFJQLM7a6Jqf2xfoDNfSmTQopMELSGm");
 
 export const DEVNET_RPC = "https://api.devnet.solana.com";
+export const SHARED_WORLD_PDA = (import.meta as any).env?.VITE_SHARED_WORLD_PDA || "";
 
 export const BUILDINGS = [
   { idx: 0,  key: "metalMine",            name: "Metal Mine",            icon: "⬡",  desc: "Extracts metal from the planet crust." },

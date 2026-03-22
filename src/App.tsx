@@ -97,11 +97,11 @@ export default function App() {
   const handleInit = useCallback(async () => {
     if (!clientRef.current) return;
     setLoading(true);
-    setStatus("Creating world...");
+    setStatus("Creating your first planet in shared universe...");
     try {
       const addrs = await clientRef.current.initializeWorld();
       setAddresses(addrs);
-      setStatus("✅ World created! Fetching state...");
+      setStatus("✅ Planet created in shared universe! Fetching state...");
       setTimeout(async () => {
         const [p, r, f] = await Promise.all([
           clientRef.current!.fetchPlanet(addrs.planetPda),
@@ -126,7 +126,7 @@ export default function App() {
     setLoading(true);
     setStatus(`Building ${name}...`);
     try {
-      const sig = await clientRef.current.startBuild(addresses.entityPda, idx);
+      const sig = await clientRef.current.startBuild(addresses.worldPda, addresses.entityPda, idx);
       setStatus(`✅ ${name} upgrade started! Tx: ${sig.slice(0,8)}…`);
       // Refresh state
       setTimeout(async () => {
@@ -148,7 +148,7 @@ export default function App() {
     setLoading(true);
     setStatus("Completing upgrade...");
     try {
-      await clientRef.current.finishBuild(addresses.entityPda);
+      await clientRef.current.finishBuild(addresses.worldPda, addresses.entityPda);
       setStatus("✅ Upgrade complete!");
       setTimeout(async () => {
         const p = await clientRef.current!.fetchPlanet(addresses.planetPda);
@@ -170,7 +170,7 @@ export default function App() {
     setStatus(`Building ${qty}× ${name}...`);
     try {
       const shipType = SHIP_TYPES[shipKey];
-      await clientRef.current.buildShip(addresses.entityPda, shipType, qty);
+      await clientRef.current.buildShip(addresses.worldPda, addresses.entityPda, shipType, qty);
       setStatus(`✅ ${qty}× ${name} built!`);
       setTimeout(async () => {
         const f = await clientRef.current!.fetchFleet(addresses.fleetPda);
@@ -191,7 +191,7 @@ export default function App() {
     setLoading(true);
     setStatus("Settling production...");
     try {
-      const sig = await clientRef.current.settleProduction(addresses.entityPda);
+      const sig = await clientRef.current.settleProduction(addresses.worldPda, addresses.entityPda);
       const r = await clientRef.current.fetchResources(addresses.resourcesPda);
       if (r) setResources(r);
       setStatus(`✅ Production settled! Tx: ${sig.slice(0,8)}…`);
@@ -253,7 +253,12 @@ export default function App() {
         )}
         {!addresses && connected && (
           <button onClick={handleInit} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,212,255,0.1)", border:"1px solid var(--accent)", color:"var(--accent)", cursor:"pointer" }}>
-            {loading ? "⟳ INITIALIZING..." : "⚡ INIT ON-CHAIN"}
+            {loading ? "⟳ INITIALIZING..." : "⚡ START IN SHARED WORLD"}
+          </button>
+        )}
+        {addresses && connected && (
+          <button onClick={handleSettleProduction} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,255,163,0.08)", border:"1px solid var(--accent3)", color:"var(--accent3)", cursor:"pointer" }}>
+            {loading ? "⟳ SETTLING..." : "⛏ SYNC PRODUCTION"}
           </button>
         )}
         {addresses && connected && (
