@@ -104,6 +104,7 @@ export default function App() {
         setStatus("✅ Ready!");
       }, 2000);
     } catch (e: any) {
+      console.error("handleInit error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
@@ -125,6 +126,7 @@ export default function App() {
         if (r) setResources(r);
       }, 2000);
     } catch (e: any) {
+      console.error("handleBuild error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
@@ -145,6 +147,7 @@ export default function App() {
         if (r) setResources(r);
       }, 2000);
     } catch (e: any) {
+      console.error("handleFinishBuild error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
@@ -166,6 +169,7 @@ export default function App() {
         if (r) setResources(r);
       }, 2000);
     } catch (e: any) {
+      console.error("handleBuildShip error:", e);
       setStatus("❌ " + (e.message || String(e)));
     }
     setLoading(false);
