@@ -261,6 +261,11 @@ export default function App() {
             {loading ? "⟳ SETTLING..." : "⛏ SYNC PRODUCTION"}
           </button>
         )}
+        {addresses && connected && (
+          <button onClick={handleSettleProduction} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,255,163,0.08)", border:"1px solid var(--accent3)", color:"var(--accent3)", cursor:"pointer" }}>
+            {loading ? "⟳ SETTLING..." : "⛏ SYNC PRODUCTION"}
+          </button>
+        )}
       </div>
 
       {/* Main */}
