@@ -268,6 +268,10 @@ export class SolarGridClient {
     this.fleetProgram     = new Program(FLEET_IDL,     provider);
   }
 
+  private storageKey(owner: PublicKey): string {
+    return `solargrid_addresses_${owner.toBase58()}`;
+  }
+
   // ── Setup ──────────────────────────────────────────────────────────────────
 
   async initializeWorld(): Promise<GameAddresses> {
@@ -304,7 +308,7 @@ export class SolarGridClient {
     const addresses = { worldPda, entityPda, planetPda, resourcesPda, fleetPda };
 
     // Save to localStorage
-    localStorage.setItem("solargrid_addresses", JSON.stringify({
+    localStorage.setItem(this.storageKey(payer), JSON.stringify({
       worldPda:     worldPda.toBase58(),
       entityPda:    entityPda.toBase58(),
       planetPda:    planetPda.toBase58(),
@@ -315,9 +319,9 @@ export class SolarGridClient {
     return addresses;
   }
 
-  loadAddresses(): GameAddresses | null {
+  loadAddresses(owner: PublicKey): GameAddresses | null {
     try {
-      const saved = localStorage.getItem("solargrid_addresses");
+      const saved = localStorage.getItem(this.storageKey(owner));
       if (!saved) return null;
       const parsed = JSON.parse(saved);
       return {
