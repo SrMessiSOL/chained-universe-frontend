@@ -1,639 +1,763 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useConnection, useWallet, useAnchorWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { AnchorProvider } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
+import { BN } from "@coral-xyz/anchor";
 
-import { BUILDINGS, SHIPS } from "./constants";
+import { BUILDINGS, SHIPS, SHIP_TYPES } from "./constants";
 import {
-  SolarGridClient, GameAddresses,
-  OnChainPlanet, OnChainResources, OnChainFleet,
-  formatNum, formatDuration, pendingProduction,
-  buildCost, buildSeconds, galaxyDistance, estimateFlightSeconds,
-  SHIP_TYPES,
+  SolarGridClient,
+  formatBig, formatNum, formatDuration,
+  pendingProduction, buildCost, buildSeconds,
+  galaxyDistance, estimateFlightSeconds,
+  GameAddresses, OnChainPlanet, OnChainResources, OnChainFleet, GalaxyEntry,
 } from "./states/game";
 
-type Page = "overview" | "buildings" | "shipyard" | "fleet" | "galaxy" | "messages";
+type Page = "overview" | "buildings" | "shipyard" | "fleet" | "galaxy";
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+const C = {
+  bg: "#080c14", surface: "#0d1320", border: "#1c2a3a",
+  accent: "#00c8f0", accent2: "#00f0a0", warn: "#f0a000",
+  danger: "#f04040", text: "#c8d8e8", muted: "#4a6070",
+  metal: "#a0b8c8", crystal: "#60c0f0", deut: "#40d890", energy: "#f0c040",
+  er: "#a060f0", // purple for ER session state
+};
+
+const css = {
+  app: { minHeight: "100vh", background: C.bg, color: C.text,
+    fontFamily: "'Share Tech Mono','Courier New',monospace", fontSize: "13px" } as React.CSSProperties,
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center",
+    padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: C.surface } as React.CSSProperties,
+  logo: { fontFamily: "'Orbitron',sans-serif", color: C.accent,
+    fontSize: "20px", letterSpacing: "3px", margin: 0 } as React.CSSProperties,
+  main: { display: "flex", height: "calc(100vh - 49px)" } as React.CSSProperties,
+  sidebar: { width: "180px", background: C.surface, borderRight: `1px solid ${C.border}`,
+    display: "flex", flexDirection: "column" as const, padding: "12px 0", flexShrink: 0 },
+  navBtn: (active: boolean): React.CSSProperties => ({
+    display: "flex", alignItems: "center", gap: "10px", padding: "10px 16px",
+    background: active ? `${C.accent}18` : "transparent",
+    color: active ? C.accent : C.muted, border: "none",
+    borderLeft: active ? `2px solid ${C.accent}` : "2px solid transparent",
+    cursor: "pointer", width: "100%", textAlign: "left",
+    fontSize: "12px", fontFamily: "inherit", letterSpacing: "1px", textTransform: "uppercase" as const,
+  }),
+  content: { flex: 1, overflow: "auto", padding: "20px" } as React.CSSProperties,
+  resBar: { display: "flex", gap: "0", padding: "8px 20px",
+    background: C.surface, borderBottom: `1px solid ${C.border}` } as React.CSSProperties,
+  resItem: { display: "flex", alignItems: "center", gap: "6px",
+    padding: "0 16px", borderRight: `1px solid ${C.border}` } as React.CSSProperties,
+  card: { background: C.surface, border: `1px solid ${C.border}`,
+    borderRadius: "4px", padding: "16px", marginBottom: "12px" } as React.CSSProperties,
+  table: { width: "100%", borderCollapse: "collapse" as const },
+  th: { textAlign: "left" as const, padding: "8px 12px",
+    borderBottom: `1px solid ${C.border}`, color: C.muted,
+    fontSize: "11px", letterSpacing: "1px", textTransform: "uppercase" as const },
+  td: { padding: "10px 12px", borderBottom: `1px solid ${C.border}18` } as React.CSSProperties,
+  btn: (variant: "primary"|"secondary"|"danger"|"warn"|"er" = "primary", disabled = false): React.CSSProperties => {
+    const col = variant === "primary" ? C.accent : variant === "warn" ? C.warn :
+      variant === "danger" ? C.danger : variant === "er" ? C.er : C.muted;
+    return {
+      padding: "6px 14px", background: disabled ? C.border : `${col}22`,
+      color: disabled ? C.muted : col, border: `1px solid ${disabled ? C.border : col}`,
+      borderRadius: "3px", cursor: disabled ? "not-allowed" : "pointer",
+      fontSize: "11px", fontFamily: "inherit", letterSpacing: "1px", whiteSpace: "nowrap" as const,
+    };
+  },
+  input: { background: "#0a1018", border: `1px solid ${C.border}`, borderRadius: "3px",
+    color: C.text, padding: "6px 10px", fontFamily: "inherit",
+    fontSize: "13px", width: "100%", boxSizing: "border-box" as const } as React.CSSProperties,
+  badge: (color: string): React.CSSProperties => ({
+    display: "inline-block", padding: "2px 8px", background: `${color}18`,
+    color, border: `1px solid ${color}44`, borderRadius: "2px", fontSize: "10px", letterSpacing: "1px",
+  }),
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function bnNum(v: BN | number): number { return v instanceof BN ? v.toNumber() : Number(v); }
+function canAfford(res: OnChainResources|null, m:number, c:number, d:number, live:{metal:BN,crystal:BN,deuterium:BN}): boolean {
+  if (!res) return false;
+  return bnNum(live.metal)>=m && bnNum(live.crystal)>=c && bnNum(live.deuterium)>=d;
+}
+function energyColor(prod:number, cons:number): string {
+  if (prod>=cons) return C.accent2; if (prod>=cons*0.8) return C.warn; return C.danger;
+}
+
+function StatusBar({ msg, ok }: { msg:string; ok?:boolean }) {
+  if (!msg) return null;
+  return <div style={{ padding:"8px 16px", background: ok===false?`${C.danger}18`:`${C.accent2}18`,
+    border:`1px solid ${ok===false?C.danger:C.accent2}44`, borderRadius:"3px",
+    color: ok===false?C.danger:C.accent2, marginBottom:"12px", fontSize:"12px" }}>{msg}</div>;
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
 
 export default function App() {
   const { connection } = useConnection();
   const wallet = useAnchorWallet();
   const { connected, publicKey } = useWallet();
 
-  const [page, setPage]           = useState<Page>("overview");
-  const [addresses, setAddresses] = useState<GameAddresses | null>(null);
-  const [planet, setPlanet]       = useState<OnChainPlanet | null>(null);
-  const [resources, setResources] = useState<OnChainResources | null>(null);
-  const [fleet, setFleet]         = useState<OnChainFleet | null>(null);
-  const [status, setStatus]       = useState("");
-  const [loading, setLoading]     = useState(false);
-  const [blockNum, setBlockNum]   = useState(0);
-  const [liveRes, setLiveRes]     = useState({ metal: 0, crystal: 0, deuterium: 0 });
+  const [page, setPage]               = useState<Page>("overview");
+  const [addresses, setAddresses]     = useState<GameAddresses|null>(null);
+  const [planet, setPlanet]           = useState<OnChainPlanet|null>(null);
+  const [resources, setResources]     = useState<OnChainResources|null>(null);
+  const [fleet, setFleet]             = useState<OnChainFleet|null>(null);
+  const [liveRes, setLiveRes]         = useState<{metal:BN,crystal:BN,deuterium:BN}>(
+    { metal: new BN(0), crystal: new BN(0), deuterium: new BN(0) }
+  );
+  const [galaxyEntries, setGalaxyEntries] = useState<GalaxyEntry[]>([]);
+  const [planetName, setPlanetName]   = useState("Homeworld");
+  const [status, setStatus]           = useState<{msg:string;ok?:boolean}|null>(null);
+  const [loading, setLoading]         = useState(false);
+  const [txBusy, setTxBusy]           = useState(false);
+  const [sessionActive, setSessionActive] = useState(false);
+  const [countdowns, setCountdowns]   = useState<Record<string,number>>({});
+  const [shipQty, setShipQty]         = useState<Record<string,number>>({});
+  const shipQtyRef = useRef<Record<string,number>>({});  // uncontrolled backing store
+  const [galaXY, setGalaXY]           = useState({ galaxy:1, system:1 });
+  const galaXYRef = useRef({ galaxy:1, system:1 });
+  const [buildRemaining, setBuildRemaining] = useState(0);
 
-  const clientRef = useRef<SolarGridClient | null>(null);
-  const pollRef   = useRef<NodeJS.Timeout | null>(null);
+  const clientRef = useRef<SolarGridClient|null>(null);
+  const pollRef   = useRef<ReturnType<typeof setInterval>|null>(null);
 
-  // Build client when wallet connects
+  // ── Init ──────────────────────────────────────────────────────────────────
+
   useEffect(() => {
-    if (!wallet || !connected || !publicKey) {
-      clientRef.current = null;
-      setAddresses(null);
-      setPlanet(null);
-      setResources(null);
-      setFleet(null);
-      return;
-    }
-    const provider = new AnchorProvider(connection, wallet, { commitment: "confirmed" });
+    if (!connected || !publicKey || !wallet) return;
+    const provider = new AnchorProvider(connection, wallet, { commitment:"confirmed" });
     clientRef.current = new SolarGridClient(connection, provider);
-
-    // Load per-wallet saved addresses
-    const saved = clientRef.current.loadAddresses(publicKey);
-    setAddresses(saved || null);
-    if (!saved) {
-      setPlanet(null);
-      setResources(null);
-      setFleet(null);
-    }
-  }, [wallet, connected, publicKey, connection]);
-
-  // Poll chain state every 5 seconds
-  useEffect(() => {
-    if (!addresses || !clientRef.current) return;
-    const poll = async () => {
-      const client = clientRef.current;
-      if (!client) return;
+    (async () => {
+      setLoading(true);
+      setStatus({ msg:"Scanning for your planet..." });
       try {
-        const [p, r, f] = await Promise.all([
-          client.fetchPlanet(addresses.planetPda),
-          client.fetchResources(addresses.resourcesPda),
-          client.fetchFleet(addresses.fleetPda),
-        ]);
-        if (p) setPlanet(p);
-        if (r) setResources(r);
-        if (f) setFleet(f);
-        const slot = await connection.getSlot();
-        setBlockNum(slot);
-      } catch (e) {
-        console.warn("Poll error:", e);
-      }
-    };
-    poll();
-    pollRef.current = setInterval(poll, 5000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [addresses, connection]);
+        const existing = await clientRef.current!.findExistingPlanet(publicKey);
+        if (existing) { setAddresses(existing); setStatus(null); }
+        else setStatus({ msg:"No planet found — create one below" });
+      } catch (e:any) { setStatus({ msg:"Load error: "+e.message, ok:false }); }
+      finally { setLoading(false); }
+    })();
+  }, [connected, publicKey, wallet, connection]);
 
-  // Live resource ticker (client-side interpolation between chain reads)
+  // ── Poll ──────────────────────────────────────────────────────────────────
+
+  const poll = useCallback(async () => {
+    if (!addresses || !clientRef.current) return;
+    try {
+      const [p,r,f] = await Promise.all([
+        clientRef.current.fetchPlanet(addresses.planetPda),
+        clientRef.current.fetchResources(addresses.resourcesPda),
+        clientRef.current.fetchFleet(addresses.fleetPda),
+      ]);
+      if (p) setPlanet(p); if (r) setResources(r); if (f) setFleet(f);
+    } catch {}
+  }, [addresses]);
+
+  useEffect(() => {
+    if (!addresses) return;
+    poll();
+    pollRef.current = setInterval(poll, sessionActive ? 3000 : 6000);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [addresses, poll, sessionActive]);
+
+  // ── Tickers ───────────────────────────────────────────────────────────────
+
+  // Live resource ticker — only updates liveRes state, not the whole page.
+  // Inputs in ShipyardPage/GalaxyPage are uncontrolled (ref-based) to avoid focus loss.
+  const liveResRef = useRef(liveRes);
   useEffect(() => {
     if (!resources) return;
-    const id = setInterval(() => {
-      const now = Math.floor(Date.now() / 1000);
-      const live = pendingProduction(resources, now);
-      setLiveRes(live);
-    }, 1000);
+    const tick = () => {
+      const next = pendingProduction(resources, Math.floor(Date.now()/1000));
+      // Only update state when a value actually changes (avoids spurious re-renders)
+      if (
+        !next.metal.eq(liveResRef.current.metal) ||
+        !next.crystal.eq(liveResRef.current.crystal) ||
+        !next.deuterium.eq(liveResRef.current.deuterium)
+      ) {
+        liveResRef.current = next;
+        setLiveRes(next);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
     return () => clearInterval(id);
   }, [resources]);
 
-  // Initialize world on-chain
-  const handleInit = useCallback(async () => {
+  useEffect(() => {
+    if (!planet) return;
+    const id = setInterval(() => setBuildRemaining(Math.max(0, planet.buildFinishTs - Math.floor(Date.now()/1000))), 1000);
+    setBuildRemaining(Math.max(0, planet.buildFinishTs - Math.floor(Date.now()/1000)));
+    return () => clearInterval(id);
+  }, [planet?.buildFinishTs]);
+
+  useEffect(() => {
+    if (!fleet) return;
+    const id = setInterval(() => {
+      const now = Math.floor(Date.now()/1000);
+      const m: Record<string,number> = {};
+      (fleet.missions||[]).forEach((ms,i) => {
+        if (ms.missionType===0) return;
+        m[i] = Math.max(0, (ms.applied?ms.returnTs:ms.arriveTs) - now);
+      });
+      setCountdowns(m);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [fleet?.missions]);
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+
+  const withTx = async (label:string, fn:()=>Promise<string>) => {
+    if (txBusy) return;
+    setTxBusy(true);
+    setStatus({ msg:`${label}…` });
+    try {
+      await fn();
+      setStatus({ msg:`${label} confirmed!`, ok:true });
+      setTimeout(poll, sessionActive ? 500 : 2000);
+    } catch (e:any) {
+      setStatus({ msg:`${label} failed: ${e.message?.slice(0,80)}`, ok:false });
+    } finally { setTxBusy(false); }
+  };
+
+  const handleCreate = async () => {
     if (!clientRef.current) return;
-    setLoading(true);
-    setStatus("Creating your first planet in shared universe...");
+    setLoading(true); setStatus({ msg:"Creating planet (3 txns)…" });
     try {
-      const addrs = await clientRef.current.initializeWorld();
-      setAddresses(addrs);
-      setStatus("✅ Planet created in shared universe! Fetching state...");
-      setTimeout(async () => {
-        const [p, r, f] = await Promise.all([
-          clientRef.current!.fetchPlanet(addrs.planetPda),
-          clientRef.current!.fetchResources(addrs.resourcesPda),
-          clientRef.current!.fetchFleet(addrs.fleetPda),
-        ]);
-        if (p) setPlanet(p);
-        if (r) setResources(r);
-        if (f) setFleet(f);
-        setStatus("✅ Ready!");
-      }, 2000);
-    } catch (e: any) {
-      console.error("handleInit error:", e);
-      setStatus("❌ " + (e.message || String(e)));
-    }
-    setLoading(false);
-  }, []);
+      const addrs = await clientRef.current.initializeWorld(planetName||"Homeworld");
+      setAddresses(addrs); setStatus(null); setTimeout(poll, 2000);
+    } catch (e:any) { setStatus({ msg:"Creation failed: "+e.message, ok:false }); }
+    finally { setLoading(false); }
+  };
 
-  // Start building
-  const handleBuild = useCallback(async (idx: number, name: string) => {
-    if (!clientRef.current || !addresses) { setStatus("⚠ Connect wallet first"); return; }
-    setLoading(true);
-    setStatus(`Building ${name}...`);
+  // ── Session actions ────────────────────────────────────────────────────────
+
+  const handleStartSession = async () => {
+    if (!addresses || !clientRef.current || txBusy) return;
+    setTxBusy(true);
+    setStatus({ msg:"Starting session (1 wallet approval)…" });
     try {
-      const sig = await clientRef.current.startBuild(addresses.worldPda, addresses.entityPda, idx);
-      setStatus(`✅ ${name} upgrade started! Tx: ${sig.slice(0,8)}…`);
-      // Refresh state
-      setTimeout(async () => {
-        const p = await clientRef.current!.fetchPlanet(addresses.planetPda);
-        const r = await clientRef.current!.fetchResources(addresses.resourcesPda);
-        if (p) setPlanet(p);
-        if (r) setResources(r);
-      }, 2000);
-    } catch (e: any) {
-      console.error("handleBuild error:", e);
-      setStatus("❌ " + (e.message || String(e)));
-    }
-    setLoading(false);
-  }, [addresses]);
+      await clientRef.current.startSession(addresses.entityPda);
+      setSessionActive(true);
+      setStatus({ msg:"⚡ Session active — instant transactions, no wallet popups!", ok:true });
+      // Poll faster during session since ER commits every 3s
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(poll, 3000);
+    } catch (e:any) {
+      setStatus({ msg:"Session start failed: "+e.message, ok:false });
+    } finally { setTxBusy(false); }
+  };
 
-  // Finish build
-  const handleFinishBuild = useCallback(async () => {
-    if (!clientRef.current || !addresses) return;
-    setLoading(true);
-    setStatus("Completing upgrade...");
+  const handleEndSession = async () => {
+    if (!addresses || !clientRef.current || txBusy) return;
+    setTxBusy(true);
+    setStatus({ msg:"Saving to Solana (1 wallet approval)…" });
     try {
-      await clientRef.current.finishBuild(addresses.worldPda, addresses.entityPda);
-      setStatus("✅ Upgrade complete!");
-      setTimeout(async () => {
-        const p = await clientRef.current!.fetchPlanet(addresses.planetPda);
-        const r = await clientRef.current!.fetchResources(addresses.resourcesPda);
-        if (p) setPlanet(p);
-        if (r) setResources(r);
-      }, 2000);
-    } catch (e: any) {
-      console.error("handleFinishBuild error:", e);
-      setStatus("❌ " + (e.message || String(e)));
-    }
-    setLoading(false);
-  }, [addresses]);
+      await clientRef.current.endSession(addresses.worldPda, addresses.entityPda);
+      setSessionActive(false);
+      setStatus({ msg:"State saved to Solana ✓", ok:true });
+      // Slow poll back down
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(poll, 6000);
+      setTimeout(poll, 1000);
+    } catch (e:any) {
+      setStatus({ msg:"Session end failed: "+e.message, ok:false });
+    } finally { setTxBusy(false); }
+  };
 
-  // Build ship
-  const handleBuildShip = useCallback(async (shipKey: string, name: string, qty: number) => {
-    if (!clientRef.current || !addresses) return;
+  const handleUpgrade = (idx:number) => {
+    if (!addresses||!clientRef.current) return;
+    const b = BUILDINGS[idx];
+    withTx(`Upgrade ${b.name}`, () =>
+      clientRef.current!.startBuild(addresses.worldPda, addresses.entityPda, idx));
+  };
+
+  const handleFinishBuild = () => {
+    if (!addresses||!clientRef.current) return;
+    withTx("Complete build", async () => {
+      const sig = await clientRef.current!.finishBuild(addresses.worldPda, addresses.entityPda);
+      setPlanet(prev => prev ? { ...prev, buildQueueItem:255, buildQueueTarget:0, buildFinishTs:0 } : prev);
+      return sig;
+    });
+  };
+
+  const handleBuildShip = (shipKey:string) => {
+    if (!addresses||!clientRef.current) return;
+    const qty  = shipQtyRef.current[shipKey] ?? shipQty[shipKey] ?? 1;
+    const type = SHIP_TYPES[shipKey];
+    withTx(`Build ${qty}× ${shipKey}`, () =>
+      clientRef.current!.buildShip(addresses.worldPda, addresses.entityPda, type, qty));
+  };
+
+  const handleScanGalaxy = async () => {
+    if (!clientRef.current||!publicKey) return;
     setLoading(true);
-    setStatus(`Building ${qty}× ${name}...`);
-    try {
-      const shipType = SHIP_TYPES[shipKey];
-      await clientRef.current.buildShip(addresses.worldPda, addresses.entityPda, shipType, qty);
-      setStatus(`✅ ${qty}× ${name} built!`);
-      setTimeout(async () => {
-        const f = await clientRef.current!.fetchFleet(addresses.fleetPda);
-        const r = await clientRef.current!.fetchResources(addresses.resourcesPda);
-        if (f) setFleet(f);
-        if (r) setResources(r);
-      }, 2000);
-    } catch (e: any) {
-      console.error("handleBuildShip error:", e);
-      setStatus("❌ " + (e.message || String(e)));
-    }
-    setLoading(false);
-  }, [addresses]);
+    try { setGalaxyEntries(await clientRef.current.scanGalaxy(galaXY.galaxy, galaXY.system, publicKey)); }
+    catch {} finally { setLoading(false); }
+  };
 
+  // ── Computed ──────────────────────────────────────────────────────────────
 
-  const handleSettleProduction = useCallback(async () => {
-    if (!clientRef.current || !addresses) return;
-    setLoading(true);
-    setStatus("Settling production...");
-    try {
-      const sig = await clientRef.current.settleProduction(addresses.worldPda, addresses.entityPda);
-      const r = await clientRef.current.fetchResources(addresses.resourcesPda);
-      if (r) setResources(r);
-      setStatus(`✅ Production settled! Tx: ${sig.slice(0,8)}…`);
-    } catch (e: any) {
-      console.error("handleSettleProduction error:", e);
-      setStatus("❌ " + (e.message || String(e)));
-    }
-    setLoading(false);
-  }, [addresses]);
+  const energyProd = bnNum(resources?.energy_production ?? 0);
+  const energyCons = bnNum(resources?.energy_consumption ?? 0);
+  const efficiency = energyCons===0?100:Math.min(100,Math.round((energyProd/energyCons)*100));
 
-  const energy = resources ? resources.energyProduction - resources.energyConsumption : 0;
-  const displayRes = resources ? liveRes : { metal: 0, crystal: 0, deuterium: 0 };
+  // ── Sub-pages ─────────────────────────────────────────────────────────────
 
-  return (
-    <div style={{ display:"flex", flexDirection:"column", height:"100vh" }}>
-      {/* Header */}
-      <header style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 20px", height:52, background:"rgba(2,8,20,0.97)", borderBottom:"1px solid var(--border)", flexShrink:0 }}>
-        <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:900, fontSize:"1.2rem", color:"var(--accent)", letterSpacing:"0.1em" }}>
-          SOLAR<span style={{color:"var(--accent2)"}}>GRID</span>
-          <span style={{ fontSize:"0.5rem", color:"var(--dim)", marginLeft:10, letterSpacing:"0.1em" }}>BOLT ECS · DEVNET</span>
-        </div>
-        <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:"0.68rem", color:"var(--dim)", display:"flex", alignItems:"center", gap:16 }}>
-          {blockNum > 0 && <span>Block: <span style={{color:"var(--accent)"}}>{blockNum.toLocaleString()}</span></span>}
-          {status && <span style={{ color: status.startsWith("❌") ? "var(--red)" : status.startsWith("✅") ? "var(--accent3)" : "var(--energy)", maxWidth:300, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{status}</span>}
-          {loading && <span style={{ color:"var(--accent)", animation:"pulse 1s infinite" }}>⟳</span>}
-        </div>
-        <WalletMultiButton style={{ fontFamily:"'Orbitron',sans-serif", fontSize:"0.62rem", background:"transparent", border:"1px solid var(--accent)", color:"var(--accent)", height:32, borderRadius:0 }} />
-      </header>
-
-      {/* Resource Bar */}
-      <div style={{ display:"flex", gap:20, padding:"6px 20px", background:"rgba(4,12,28,0.95)", borderBottom:"1px solid var(--border)", flexShrink:0, flexWrap:"wrap", alignItems:"center" }}>
-        {[
-          { label:"METAL",     val:displayRes.metal,     rate:resources?.metalHour||0,     color:"var(--metal)",   icon:"⬡" },
-          { label:"CRYSTAL",   val:displayRes.crystal,   rate:resources?.crystalHour||0,   color:"var(--crystal)", icon:"◈" },
-          { label:"DEUTERIUM", val:displayRes.deuterium, rate:resources?.deuteriumHour||0, color:"var(--deut)",    icon:"◉" },
-        ].map(({ label, val, rate, color, icon }) => (
-          <div key={label} style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ fontSize:"1.1rem" }}>{icon}</span>
+  function OverviewPage() {
+    return (
+      <div>
+        <div style={{ ...css.card, borderColor: C.accent+"44" }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
             <div>
-              <div style={{ fontSize:"0.6rem", color:"var(--dim)", letterSpacing:"0.06em" }}>{label}</div>
-              <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:"0.82rem", color }}>{formatNum(val)}</div>
-              {rate > 0 && <div style={{ fontSize:"0.6rem", color:"var(--accent3)" }}>+{formatNum(rate)}/h</div>}
-            </div>
-          </div>
-        ))}
-        {resources && (
-          <>
-            <div style={{ width:1, height:28, background:"var(--border)" }} />
-            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-              <span>⚡</span>
-              <div>
-                <div style={{ fontSize:"0.6rem", color:"var(--dim)" }}>ENERGY</div>
-                <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:"0.82rem", color: energy >= 0 ? "var(--energy)" : "var(--red)" }}>
-                  {energy >= 0 ? "+" : ""}{formatNum(energy)}
-                </div>
+              <h2 style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif", margin:"0 0 4px" }}>
+                {planet?.name||"—"}
+              </h2>
+              <div style={{ color:C.muted, fontSize:"12px" }}>
+                {planet?`${planet.galaxy}:${planet.system}:${planet.position}`:"—"}
+                {planet?` · ${planet.temperature}°C · Ø${planet.diameter?.toLocaleString()}km`:""}
               </div>
             </div>
-          </>
-        )}
-        {!addresses && connected && (
-          <button onClick={handleInit} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,212,255,0.1)", border:"1px solid var(--accent)", color:"var(--accent)", cursor:"pointer" }}>
-            {loading ? "⟳ INITIALIZING..." : "⚡ START IN SHARED WORLD"}
-          </button>
-        )}
-        {addresses && connected && (
-          <button onClick={handleSettleProduction} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,255,163,0.08)", border:"1px solid var(--accent3)", color:"var(--accent3)", cursor:"pointer" }}>
-            {loading ? "⟳ SETTLING..." : "⛏ SYNC PRODUCTION"}
-          </button>
-        )}
-        {addresses && connected && (
-          <button onClick={handleSettleProduction} disabled={loading} style={{ marginLeft:"auto", padding:"6px 16px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:700, letterSpacing:"0.1em", background:"rgba(0,255,163,0.08)", border:"1px solid var(--accent3)", color:"var(--accent3)", cursor:"pointer" }}>
-            {loading ? "⟳ SETTLING..." : "⛏ SYNC PRODUCTION"}
-          </button>
-        )}
-      </div>
+            <div style={{ textAlign:"right" }}>
+              <div style={{ color:C.muted, fontSize:"11px" }}>FIELDS</div>
+              <div style={{ color:C.text }}>{planet?.usedFields??"—"} / {planet?.maxFields??"—"}</div>
+            </div>
+          </div>
+        </div>
 
-      {/* Main */}
-      <div style={{ display:"grid", gridTemplateColumns:"190px 1fr 260px", flex:1, overflow:"hidden" }}>
-        {/* Sidebar */}
-        <aside style={{ background:"rgba(4,10,24,0.97)", borderRight:"1px solid var(--border)", overflowY:"auto", padding:"10px 0" }}>
-          {([
-            { p:"overview"  as Page, icon:"🪐", label:"Overview" },
-            { p:"buildings" as Page, icon:"🏗",  label:"Buildings" },
-            { p:"shipyard"  as Page, icon:"🚀", label:"Shipyard" },
-            { p:"fleet"     as Page, icon:"⚔️",  label:"Fleet", badge: fleet?.activeMissions || 0 },
-            { p:"galaxy"    as Page, icon:"🌌", label:"Galaxy" },
-            { p:"messages"  as Page, icon:"📡", label:"Messages" },
-          ]).map(({ p, icon, label, badge }) => (
-            <div key={p} onClick={() => setPage(p)} style={{ display:"flex", alignItems:"center", gap:10, padding:"9px 16px", cursor:"pointer", borderLeft:`2px solid ${page===p?"var(--accent)":"transparent"}`, background:page===p?"rgba(0,212,255,0.07)":"transparent", color:page===p?"var(--accent)":"var(--dim)", fontSize:"0.82rem", transition:"all 0.15s" }}>
-              <span style={{ width:20, textAlign:"center" }}>{icon}</span>
-              <span style={{ flex:1 }}>{label}</span>
-              {badge ? <span style={{ fontSize:"0.58rem", padding:"1px 6px", background:"var(--accent2)", color:"#fff", fontFamily:"'Orbitron',sans-serif", borderRadius:2 }}>{badge}</span> : null}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"12px", marginBottom:"12px" }}>
+          {[
+            { label:"METAL",     val:liveRes.metal,    cap:resources?.metal_cap,    rh:resources?.metal_hour,    color:C.metal   },
+            { label:"CRYSTAL",   val:liveRes.crystal,  cap:resources?.crystal_cap,  rh:resources?.crystal_hour,  color:C.crystal },
+            { label:"DEUTERIUM", val:liveRes.deuterium,cap:resources?.deuterium_cap,rh:resources?.deuterium_hour,color:C.deut    },
+          ].map(r => (
+            <div key={r.label} style={{ ...css.card, borderColor:r.color+"44" }}>
+              <div style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px", marginBottom:"6px" }}>{r.label}</div>
+              <div style={{ color:r.color, fontSize:"20px", fontFamily:"'Orbitron',sans-serif" }}>{formatBig(r.val)}</div>
+              <div style={{ color:C.muted, fontSize:"11px", marginTop:"4px" }}>
+                / {formatBig(r.cap??0)} · +{formatBig(r.rh??0)}/h
+              </div>
+              {r.cap && <div style={{ marginTop:"8px", height:"3px", background:C.border, borderRadius:"2px" }}>
+                <div style={{ height:"100%", background:r.color, borderRadius:"2px", transition:"width 1s linear",
+                  width:`${Math.min(100,(bnNum(r.val)/bnNum(r.cap))*100)}%` }} />
+              </div>}
             </div>
           ))}
-        </aside>
+        </div>
 
-        {/* Center */}
-        <main style={{ overflowY:"auto", padding:20, background:"var(--bg)" }}>
-          {!connected && <ConnectPrompt />}
-          {connected && !addresses && <InitPrompt onInit={handleInit} loading={loading} />}
-          {connected && addresses && (
-            <>
-              {page === "overview"  && <OverviewPage planet={planet} />}
-              {page === "buildings" && <BuildingsPage planet={planet} resources={resources} displayRes={displayRes} loading={loading} onBuild={handleBuild} onFinish={handleFinishBuild} />}
-              {page === "shipyard"  && <ShipyardPage fleet={fleet} resources={resources} displayRes={displayRes} loading={loading} onBuildShip={handleBuildShip} />}
-              {page === "fleet"     && <FleetPage fleet={fleet} planet={planet} />}
-              {page === "galaxy"    && <GalaxyPage planet={planet} />}
-              {page === "messages"  && <MessagesPage />}
-            </>
-          )}
-        </main>
-
-        {/* Right Panel */}
-        <aside style={{ background:"rgba(4,10,24,0.97)", borderLeft:"1px solid var(--border)", overflowY:"auto", padding:16 }}>
-          <div style={{ textAlign:"center", paddingBottom:14, borderBottom:"1px solid var(--border)", marginBottom:14 }}>
-            <div style={{ width:76, height:76, borderRadius:"50%", margin:"0 auto 10px", background:"radial-gradient(circle at 35% 35%, #1a4a8a, #0a2040 50%, #050f20 80%)", boxShadow:"0 0 30px rgba(0,100,200,0.4)" }} />
-            <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:"0.88rem", marginBottom:3 }}>{planet?.name || "—"}</div>
-            <div style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:"0.68rem", color:"var(--dim)" }}>
-              {planet ? `[${planet.galaxy}:${planet.system}:${planet.position}]` : "No planet"}
+        <div style={css.card}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+            <div>
+              <span style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px" }}>ENERGY  </span>
+              <span style={{ color:energyColor(energyProd,energyCons) }}>{energyProd} / {energyCons}</span>
             </div>
-          </div>
-          {planet && (
-            <>
-              {[["Temperature", `${planet.temperature}°C`], ["Diameter", `${planet.diameter.toLocaleString()} km`], ["Fields", `${planet.usedFields} / ${planet.maxFields}`]].map(([l, v]) => (
-                <div key={l} style={{ display:"flex", justifyContent:"space-between", fontSize:"0.7rem", marginBottom:6 }}>
-                  <span style={{ color:"var(--dim)" }}>{l}</span>
-                  <span style={{ fontFamily:"'Share Tech Mono',monospace" }}>{v}</span>
-                </div>
-              ))}
-              <div style={{ height:4, background:"rgba(255,255,255,0.05)", borderRadius:2, margin:"8px 0 14px", overflow:"hidden" }}>
-                <div style={{ height:"100%", width:`${(planet.usedFields/Math.max(planet.maxFields,1))*100}%`, background:"linear-gradient(90deg,var(--accent3),var(--accent))" }} />
+            <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
+              <div style={{ width:"120px", height:"4px", background:C.border, borderRadius:"2px" }}>
+                <div style={{ height:"100%", background:energyColor(energyProd,energyCons), width:`${efficiency}%`, borderRadius:"2px" }} />
               </div>
-            </>
-          )}
-          {addresses && (
-            <div style={{ borderTop:"1px solid var(--border)", paddingTop:12 }}>
-              <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:"0.57rem", letterSpacing:"0.12em", color:"var(--dim)", marginBottom:8 }}>ON-CHAIN</div>
-              <div style={{ fontSize:"0.63rem", marginBottom:4 }}>Wallet: <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:"0.58rem", color:"var(--accent)" }}>{publicKey?.toBase58().slice(0,16)}…</span></div>
-              <div style={{ fontSize:"0.63rem", marginBottom:4 }}>Entity: <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:"0.58rem", color:"var(--accent)" }}>{addresses.entityPda.toBase58().slice(0,16)}…</span></div>
-              <div style={{ fontSize:"0.63rem" }}>Network: <span style={{ color:"var(--accent3)" }}>Devnet</span></div>
-              <a href={`https://explorer.solana.com/address/${addresses.entityPda.toBase58()}?cluster=devnet`} target="_blank" rel="noreferrer"
-                style={{ display:"block", marginTop:8, padding:"6px", textAlign:"center", fontFamily:"'Orbitron',sans-serif", fontSize:"0.58rem", background:"rgba(0,212,255,0.05)", border:"1px solid var(--border)", color:"var(--accent)", textDecoration:"none" }}>
-                VIEW ON EXPLORER ↗
-              </a>
+              <span style={{ color:energyColor(energyProd,energyCons), fontSize:"12px" }}>{efficiency}%</span>
             </div>
-          )}
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-// ── Pages ─────────────────────────────────────────────────────────────────────
-
-function ConnectPrompt() {
-  return (
-    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", gap:16 }}>
-      <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:"1.5rem", color:"var(--accent)" }}>SOLARGRID</div>
-      <div style={{ color:"var(--dim)", fontSize:"0.85rem" }}>Connect your Solana wallet to play</div>
-      <div style={{ fontSize:"0.75rem", color:"var(--dim)" }}>Switch wallet to <strong style={{color:"var(--accent3)"}}>Devnet</strong></div>
-    </div>
-  );
-}
-
-function InitPrompt({ onInit, loading }: { onInit: () => void; loading: boolean }) {
-  return (
-    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", gap:16 }}>
-      <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:"1.2rem", color:"var(--accent)" }}>Initialize Your Empire</div>
-      <div style={{ color:"var(--dim)", fontSize:"0.8rem", textAlign:"center", maxWidth:400 }}>
-        This will create your BOLT ECS world, planet entity, and attach all components on Solana Devnet.
-        <br /><br />Cost: ~0.01 SOL for rent
-      </div>
-      <button onClick={onInit} disabled={loading} style={{ padding:"12px 32px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.8rem", fontWeight:700, letterSpacing:"0.15em", background:"rgba(0,212,255,0.1)", border:"1px solid var(--accent)", color:"var(--accent)", cursor:"pointer" }}>
-        {loading ? "⟳ CREATING..." : "⚡ CREATE PLANET"}
-      </button>
-    </div>
-  );
-}
-
-function OverviewPage({ planet }: { planet: OnChainPlanet | null }) {
-  if (!planet) return <div style={{color:"var(--dim)"}}>Loading planet data...</div>;
-  return (
-    <div>
-      <PageTitle>🪐 Overview</PageTitle>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:12 }}>
-        {BUILDINGS.map(b => {
-          const lvl = (planet as any)[b.key] || 0;
-          return (
-            <div key={b.key} style={{ background:"var(--panel)", border:"1px solid var(--border)", padding:14, clipPath:"polygon(0 0,calc(100% - 10px) 0,100% 10px,100% 100%,0 100%)" }}>
-              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
-                <span style={{ fontSize:"1.2rem" }}>{b.icon}</span>
-                <span style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:900, fontSize:"1.1rem", color:lvl>0?"var(--accent)":"var(--dim)" }}>{lvl}</span>
-              </div>
-              <div style={{ fontSize:"0.74rem", fontWeight:600 }}>{b.name}</div>
-              <div style={{ fontSize:"0.62rem", color:"var(--dim)", marginTop:3 }}>{b.desc}</div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function BuildingsPage({ planet, resources, displayRes, loading, onBuild, onFinish }: {
-  planet: OnChainPlanet | null; resources: OnChainResources | null;
-  displayRes: {metal:number;crystal:number;deuterium:number};
-  loading: boolean; onBuild: (idx:number,name:string)=>void; onFinish: ()=>void;
-}) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => { const id = setInterval(()=>setTick(t=>t+1),1000); return ()=>clearInterval(id); }, []);
-  const now = Math.floor(Date.now()/1000);
-  if (!planet) return <div style={{color:"var(--dim)"}}>Loading...</div>;
-
-  return (
-    <div>
-      <PageTitle>🏗 Buildings</PageTitle>
-      {planet.buildFinishTs > 0 && (
-        <div style={{ padding:"10px 14px", background:"rgba(255,107,26,0.07)", border:"1px solid var(--accent2)", borderLeft:"3px solid var(--accent2)", marginBottom:16, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          <span style={{ fontSize:"0.75rem" }}>⚙ Upgrading <strong style={{color:"var(--accent2)"}}>{BUILDINGS.find(b=>b.idx===planet.buildQueueItem)?.name}</strong> → Lv.{planet.buildQueueTarget}</span>
-          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ fontFamily:"'Share Tech Mono',monospace", color:"var(--accent3)", fontSize:"0.75rem" }}>{formatDuration(Math.max(0, planet.buildFinishTs - now))}</span>
-            {now >= planet.buildFinishTs && (
-              <button onClick={onFinish} disabled={loading} style={{ padding:"4px 12px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.6rem", background:"rgba(57,255,20,0.1)", border:"1px solid var(--accent3)", color:"var(--accent3)", cursor:"pointer" }}>
-                COLLECT ✓
-              </button>
-            )}
           </div>
         </div>
-      )}
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:12 }}>
-        {BUILDINGS.map(b => {
-          const level = (planet as any)[b.key] || 0;
-          const cost  = buildCost(b.idx, level);
-          const canAfford = displayRes.metal >= cost.m && displayRes.crystal >= cost.c && displayRes.deuterium >= cost.d;
-          const busy  = planet.buildFinishTs > 0;
-          const isBuilding = busy && planet.buildQueueItem === b.idx;
-          const dur   = buildSeconds(b.idx, level+1, planet.roboticsFactory);
-          const pct   = isBuilding ? Math.min(100, Math.max(0, ((now-(planet.buildFinishTs-dur))/dur)*100)) : 0;
 
-          return (
-            <div key={b.key} style={{ background:"var(--panel)", border:`1px solid ${isBuilding?"var(--accent2)":"var(--border)"}`, padding:14, clipPath:"polygon(0 0,calc(100% - 10px) 0,100% 10px,100% 100%,0 100%)", position:"relative" }}>
-              {isBuilding && <div style={{ position:"absolute", top:6, right:8, fontSize:"0.5rem", fontFamily:"'Orbitron',sans-serif", color:"var(--accent2)" }}>UPGRADING</div>}
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
-                <div>
-                  <div style={{ fontSize:"0.77rem", fontWeight:600 }}>{b.icon} {b.name}</div>
-                  <div style={{ fontSize:"0.62rem", color:"var(--dim)", marginTop:2 }}>{b.desc}</div>
+        {planet && planet.buildFinishTs > 0 && (
+          <div style={{ ...css.card, borderColor:(buildRemaining===0?C.accent2:C.warn)+"44" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <span style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px" }}>
+                  {buildRemaining===0?"COMPLETED":"BUILDING"}{"  "}
+                </span>
+                <span>{BUILDINGS[planet.buildQueueItem]?.name} → Lv {planet.buildQueueTarget}</span>
+              </div>
+              <div style={{ display:"flex", gap:"10px", alignItems:"center" }}>
+                {buildRemaining > 0
+                  ? <span style={{ color:C.warn, fontFamily:"'Orbitron',sans-serif" }}>{formatDuration(buildRemaining)}</span>
+                  : <button style={css.btn("primary",txBusy)} disabled={txBusy} onClick={handleFinishBuild}>COLLECT</button>
+                }
+              </div>
+            </div>
+          </div>
+        )}
+
+        {fleet && fleet.missions.filter(m=>m.missionType!==0).length>0 && (
+          <div style={css.card}>
+            <div style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px", marginBottom:"8px" }}>ACTIVE MISSIONS</div>
+            {fleet.missions.map((m,i) => {
+              if (m.missionType===0) return null;
+              const labels = ["","ATTACK","TRANSPORT","DEPLOY","ESPIONAGE","COLONIZE","RECYCLE"];
+              return (
+                <div key={i} style={{ display:"flex", justifyContent:"space-between", padding:"4px 0", borderBottom:`1px solid ${C.border}18` }}>
+                  <span style={css.badge(m.missionType===1?C.danger:C.accent)}>{labels[m.missionType]||"MISSION"}</span>
+                  <span style={{ color:C.text }}>{formatDuration(countdowns[i]??0)}</span>
+                  <span style={{ color:C.muted }}>{m.applied?"RETURNING":"EN ROUTE"}</span>
                 </div>
-                <span style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:900, fontSize:"1.1rem", color:level>0?"var(--accent)":"var(--dim)", flexShrink:0 }}>{level}</span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function BuildingsPage() {
+    const buildInProgress = planet ? planet.buildFinishTs > 0 && buildRemaining > 0 : false;
+    const buildReady      = planet ? planet.buildFinishTs > 0 && buildRemaining === 0 : false;
+    const queueFree       = planet ? !buildInProgress && !buildReady : false;
+    const queuedIdx       = (planet && planet.buildFinishTs > 0) ? planet.buildQueueItem : 255;
+
+    return (
+      <div>
+        <h2 style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif", marginTop:0 }}>Buildings</h2>
+
+        {(buildInProgress||buildReady) && planet && queuedIdx!==255 && (
+          <div style={{ ...css.card, borderColor:(buildReady?C.accent2:C.warn)+"66", marginBottom:"16px" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div>
+                <span style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px" }}>
+                  {buildReady?"COMPLETED":"BUILDING"}{"  "}
+                </span>
+                <span style={{ color:C.text }}>{BUILDINGS[queuedIdx]?.name} → Level {planet.buildQueueTarget}</span>
               </div>
-              <div style={{ display:"flex", gap:4, flexWrap:"wrap", marginBottom:6 }}>
-                {cost.m>0 && <CostPill label="⬡" val={cost.m} ok={displayRes.metal>=cost.m} />}
-                {cost.c>0 && <CostPill label="◈" val={cost.c} ok={displayRes.crystal>=cost.c} />}
-                {cost.d>0 && <CostPill label="◉" val={cost.d} ok={displayRes.deuterium>=cost.d} />}
+              <div style={{ display:"flex", gap:"12px", alignItems:"center" }}>
+                {buildInProgress && <span style={{ color:C.warn, fontFamily:"'Orbitron',sans-serif" }}>{formatDuration(buildRemaining)}</span>}
+                {buildReady && <button style={css.btn("primary",txBusy)} disabled={txBusy} onClick={handleFinishBuild}>✓ COLLECT</button>}
               </div>
-              <div style={{ fontSize:"0.62rem", color:"var(--dim)", marginBottom:8 }}>⏱ {formatDuration(dur)}</div>
-              {isBuilding ? (
+            </div>
+          </div>
+        )}
+
+        <table style={css.table}>
+          <thead><tr>{["Building","Lv","Next Cost","Time",""].map(h=><th key={h} style={css.th}>{h}</th>)}</tr></thead>
+          <tbody>
+            {BUILDINGS.map((b,i) => {
+              const lv      = planet?(planet as any)[b.key]??0:0;
+              const cost    = buildCost(i,lv);
+              const dur     = buildSeconds(i,lv+1,planet?.roboticsFactory??0);
+              const affordable = canAfford(resources,cost.m,cost.c,cost.d,liveRes);
+              const isQueued   = queuedIdx===i;
+              const canStart   = queueFree && !!planet && planet.usedFields<planet.maxFields && affordable && !txBusy;
+              return (
+                <tr key={b.key} style={{ background:isQueued?`${C.warn}08`:"transparent" }}>
+                  <td style={css.td}><span style={{ marginRight:"8px" }}>{b.icon}</span><span style={{ color:C.text }}>{b.name}</span>
+                    <div style={{ color:C.muted, fontSize:"11px" }}>{b.desc}</div></td>
+                  <td style={{ ...css.td, color:C.accent, fontFamily:"'Orbitron',sans-serif" }}>{lv}</td>
+                  <td style={{ ...css.td, fontSize:"11px" }}>
+                    {cost.m>0&&<span style={{ color:C.metal }}>M:{formatNum(cost.m)} </span>}
+                    {cost.c>0&&<span style={{ color:C.crystal }}>C:{formatNum(cost.c)} </span>}
+                    {cost.d>0&&<span style={{ color:C.deut }}>D:{formatNum(cost.d)}</span>}
+                  </td>
+                  <td style={{ ...css.td, color:C.muted }}>{formatDuration(dur)}</td>
+                  <td style={css.td}>
+                    {isQueued&&buildInProgress ? <span style={{ color:C.warn }}>{formatDuration(buildRemaining)}</span>
+                      : isQueued&&buildReady ? <button style={css.btn("primary",txBusy)} disabled={txBusy} onClick={handleFinishBuild}>✓ COLLECT</button>
+                      : <button style={css.btn("primary",!canStart)} disabled={!canStart} onClick={()=>handleUpgrade(i)}>
+                          {!queueFree?"BUSY":!affordable?"NO FUNDS":"UPGRADE"}
+                        </button>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  function ShipyardPage() {
+    if (!planet?.shipyard) return (
+      <div style={{ textAlign:"center", padding:"60px 0", color:C.muted }}>
+        Build a <span style={{ color:C.accent }}>Shipyard</span> first (Buildings tab)
+      </div>
+    );
+    return (
+      <div>
+        <h2 style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif", marginTop:0 }}>
+          Shipyard <span style={{ fontSize:"14px", color:C.muted }}>Lv {planet.shipyard}</span>
+        </h2>
+        <table style={css.table}>
+          <thead><tr>{["Ship","Atk","Cargo","Cost","Qty",""].map(h=><th key={h} style={css.th}>{h}</th>)}</tr></thead>
+          <tbody>
+            {SHIPS.map(s => {
+              const qty = shipQty[s.key]||1;
+              const cost = { m:s.cost.m*qty, c:s.cost.c*qty, d:s.cost.d*qty };
+              const affordable = canAfford(resources,cost.m,cost.c,cost.d,liveRes);
+              return (
+                <tr key={s.key}>
+                  <td style={css.td}><span style={{ marginRight:"8px" }}>{s.icon}</span><span style={{ color:C.text }}>{s.name}</span>
+                    <div style={{ color:C.muted, fontSize:"11px" }}>Fleet: {(fleet as any)?.[s.key]??0}</div></td>
+                  <td style={{ ...css.td, color:C.danger }}>{formatNum(s.atk)}</td>
+                  <td style={{ ...css.td, color:C.crystal }}>{s.cargo?formatNum(s.cargo):"—"}</td>
+                  <td style={{ ...css.td, fontSize:"11px" }}>
+                    {s.cost.m>0&&<span style={{ color:C.metal }}>M:{formatNum(cost.m)} </span>}
+                    {s.cost.c>0&&<span style={{ color:C.crystal }}>C:{formatNum(cost.c)} </span>}
+                    {s.cost.d>0&&<span style={{ color:C.deut }}>D:{formatNum(cost.d)}</span>}
+                  </td>
+                  <td style={{ ...css.td, width:"80px" }}>
+                    <input
+                      type="number" min={1}
+                      style={{ ...css.input, width:"70px" }}
+                      defaultValue={shipQtyRef.current[s.key] ?? 1}
+                      onBlur={e => { shipQtyRef.current[s.key] = Math.max(1, parseInt(e.target.value)||1); }}
+                      onChange={e => { shipQtyRef.current[s.key] = Math.max(1, parseInt(e.target.value)||1); }}
+                      key={s.key}
+                    />
+                  </td>
+                  <td style={css.td}>
+                    <button style={css.btn("primary",txBusy||!affordable)} disabled={txBusy||!affordable} onClick={()=>handleBuildShip(s.key)}>BUILD</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  function FleetPage() {
+    const missions = (fleet?.missions??[]).filter(m=>m.missionType!==0);
+    const missionLabels = ["","Attack","Transport","Deploy","Espionage","Colonize","Recycle"];
+    return (
+      <div>
+        <h2 style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif", marginTop:0 }}>Fleet</h2>
+        <div style={css.card}>
+          <div style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px", marginBottom:"12px" }}>STATIONED</div>
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(150px,1fr))", gap:"8px" }}>
+            {SHIPS.map(s => {
+              const count = (fleet as any)?.[s.key]??0;
+              if (!count) return null;
+              return <div key={s.key} style={{ display:"flex", gap:"8px", alignItems:"center" }}>
+                <span>{s.icon}</span>
                 <div>
-                  <div style={{ height:3, background:"rgba(0,212,255,0.1)", overflow:"hidden" }}>
-                    <div style={{ height:"100%", width:`${pct}%`, background:"linear-gradient(90deg,var(--accent),var(--accent2))", transition:"width 1s linear" }} />
-                  </div>
-                  <div style={{ fontSize:"0.62rem", color:"var(--accent2)", marginTop:4, fontFamily:"'Share Tech Mono',monospace" }}>{formatDuration(Math.max(0, planet.buildFinishTs-now))}</div>
+                  <div style={{ color:C.text, fontSize:"12px" }}>{s.name}</div>
+                  <div style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif" }}>{count.toLocaleString()}</div>
                 </div>
-              ) : (
-                <button disabled={!canAfford || busy || loading} onClick={() => onBuild(b.idx, b.name)}
-                  style={{ width:"100%", padding:7, fontFamily:"'Orbitron',sans-serif", fontSize:"0.62rem", fontWeight:700, letterSpacing:"0.1em", background:"transparent", border:`1px solid ${canAfford&&!busy?"var(--accent)":"var(--border)"}`, color:canAfford&&!busy?"var(--accent)":"var(--dim)", cursor:canAfford&&!busy&&!loading?"pointer":"not-allowed" }}>
-                  ▲ UPGRADE → LV.{level+1}
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function ShipyardPage({ fleet, resources, displayRes, loading, onBuildShip }: {
-  fleet: OnChainFleet|null; resources: OnChainResources|null;
-  displayRes:{metal:number;crystal:number;deuterium:number};
-  loading:boolean; onBuildShip:(key:string,name:string,qty:number)=>void;
-}) {
-  const [qtys, setQtys] = useState<Record<string,number>>({});
-  return (
-    <div>
-      <PageTitle>🚀 Shipyard</PageTitle>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))", gap:12 }}>
-        {SHIPS.map(s => {
-          const qty = qtys[s.key] || 1;
-          const stationed = fleet ? (fleet as any)[s.key] || 0 : 0;
-          const canAfford = displayRes.metal >= s.cost.m*qty && displayRes.crystal >= s.cost.c*qty && displayRes.deuterium >= s.cost.d*qty;
-          return (
-            <div key={s.key} style={{ background:"var(--panel)", border:"1px solid var(--border)", padding:14, textAlign:"center", clipPath:"polygon(0 0,calc(100% - 10px) 0,100% 10px,100% 100%,0 100%)" }}>
-              <div style={{ fontSize:"1.8rem", marginBottom:4 }}>{s.icon}</div>
-              <div style={{ fontSize:"0.72rem", fontWeight:600, marginBottom:2 }}>{s.name}</div>
-              <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:900, fontSize:"1rem", color:stationed>0?"var(--text)":"var(--dim)", marginBottom:6 }}>{stationed>0?stationed.toLocaleString():"0"}</div>
-              <div style={{ fontSize:"0.6rem", color:"var(--dim)", marginBottom:8 }}>⚔ {s.atk.toLocaleString()} · 📦 {s.cargo.toLocaleString()}</div>
-              <div style={{ display:"flex", gap:4, flexWrap:"wrap", justifyContent:"center", marginBottom:8 }}>
-                {s.cost.m>0 && <CostPill label="⬡" val={s.cost.m*qty} ok={displayRes.metal>=s.cost.m*qty} />}
-                {s.cost.c>0 && <CostPill label="◈" val={s.cost.c*qty} ok={displayRes.crystal>=s.cost.c*qty} />}
-                {s.cost.d>0 && <CostPill label="◉" val={s.cost.d*qty} ok={displayRes.deuterium>=s.cost.d*qty} />}
+              </div>;
+            })}
+            {SHIPS.every(s=>!(fleet as any)?.[s.key]) && <div style={{ color:C.muted, gridColumn:"1/-1" }}>No ships stationed</div>}
+          </div>
+        </div>
+        {missions.length>0 && (
+          <div style={css.card}>
+            <div style={{ color:C.muted, fontSize:"10px", letterSpacing:"2px", marginBottom:"12px" }}>IN FLIGHT</div>
+            {missions.map((m,i) => (
+              <div key={i} style={{ padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"6px" }}>
+                  <span style={css.badge(m.missionType===1?C.danger:C.accent)}>{missionLabels[m.missionType]}</span>
+                  <span style={{ color:C.muted, fontSize:"11px" }}>{m.applied?"RETURNING":"EN ROUTE"} · ETA {formatDuration(countdowns[i]??0)}</span>
+                </div>
+                <div style={{ fontSize:"11px", color:C.muted, display:"flex", gap:"12px", flexWrap:"wrap" }}>
+                  {m.sLightFighter>0&&<span>LF:{m.sLightFighter}</span>}
+                  {m.sHeavyFighter>0&&<span>HF:{m.sHeavyFighter}</span>}
+                  {m.sCruiser>0&&<span>CR:{m.sCruiser}</span>}
+                  {m.sBattleship>0&&<span>BS:{m.sBattleship}</span>}
+                  {m.sSmallCargo>0&&<span>SC:{m.sSmallCargo}</span>}
+                  {m.sLargeCargo>0&&<span>LC:{m.sLargeCargo}</span>}
+                  {m.cargoMetal>0&&<span style={{ color:C.metal }}>M:{formatNum(m.cargoMetal)}</span>}
+                  {m.cargoCrystal>0&&<span style={{ color:C.crystal }}>C:{formatNum(m.cargoCrystal)}</span>}
+                  {m.cargoDeuterium>0&&<span style={{ color:C.deut }}>D:{formatNum(m.cargoDeuterium)}</span>}
+                </div>
               </div>
-              <div style={{ display:"flex", gap:4 }}>
-                <input type="number" min={1} value={qty} onChange={e => setQtys(q=>({...q,[s.key]:Math.max(1,parseInt(e.target.value)||1)}))}
-                  style={{ width:50, padding:"5px 4px", fontSize:"0.78rem", textAlign:"center" }} />
-                <button disabled={!canAfford||loading} onClick={() => onBuildShip(s.key, s.name, qty)}
-                  style={{ flex:1, padding:"5px 0", fontFamily:"'Orbitron',sans-serif", fontSize:"0.58rem", fontWeight:700, background:"transparent", border:`1px solid ${canAfford&&!loading?"var(--accent)":"var(--border)"}`, color:canAfford&&!loading?"var(--accent)":"var(--dim)", cursor:canAfford&&!loading?"pointer":"not-allowed" }}>
-                  BUILD
-                </button>
-              </div>
-            </div>
-          );
-        })}
+            ))}
+          </div>
+        )}
       </div>
-    </div>
-  );
-}
+    );
+  }
 
-function FleetPage({ fleet, planet }: { fleet: OnChainFleet|null; planet: OnChainPlanet|null }) {
-  const now = Math.floor(Date.now()/1000);
-  const [tick, setTick] = useState(0);
-  useEffect(()=>{ const id=setInterval(()=>setTick(t=>t+1),1000); return ()=>clearInterval(id); },[]);
-  const mLabels: Record<number,string> = {1:"ATTACK",2:"TRANSPORT",3:"DEPLOY",4:"ESPIONAGE",5:"COLONIZE",6:"RECYCLE"};
-  const mColors: Record<number,string> = {1:"var(--red)",2:"var(--accent)",3:"var(--accent3)",4:"var(--energy)"};
-
-  return (
-    <div>
-      <PageTitle>⚔️ Fleet</PageTitle>
-      <SectionTitle>Stationed Ships</SectionTitle>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(120px,1fr))", gap:8, marginBottom:24 }}>
-        {SHIPS.map(s => {
-          const count = fleet ? (fleet as any)[s.key] || 0 : 0;
-          return (
-            <div key={s.key} style={{ background:"var(--panel)", border:"1px solid var(--border)", padding:10, textAlign:"center" }}>
-              <div style={{ fontSize:"1.4rem" }}>{s.icon}</div>
-              <div style={{ fontSize:"0.62rem", color:"var(--dim)", margin:"3px 0 2px" }}>{s.name}</div>
-              <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:count>0?"0.95rem":"0.75rem", fontWeight:700, color:count>0?"var(--text)":"var(--dim)" }}>
-                {count>0?count.toLocaleString():"—"}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {fleet && fleet.missions.length > 0 && (
-        <>
-          <SectionTitle>Active Missions ({fleet.activeMissions})</SectionTitle>
-          <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"0.73rem" }}>
-            <thead>
-              <tr style={{ borderBottom:"1px solid var(--border)" }}>
-                {["TYPE","TARGET","ETA"].map(h=><th key={h} style={{ padding:"5px 8px", textAlign:"left", fontFamily:"'Orbitron',sans-serif", fontSize:"0.58rem", letterSpacing:"0.1em", color:"var(--dim)" }}>{h}</th>)}
-              </tr>
-            </thead>
+  function GalaxyPage() {
+    return (
+      <div>
+        <h2 style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif", marginTop:0 }}>Galaxy</h2>
+        <div style={{ display:"flex", gap:"10px", marginBottom:"16px", alignItems:"center" }}>
+          <span style={{ color:C.muted }}>G:</span>
+          <input type="number" min={1} max={9} style={{ ...css.input, width:"60px" }}
+            defaultValue={galaXYRef.current.galaxy}
+            onChange={e=>{ const v=parseInt(e.target.value)||1; galaXYRef.current.galaxy=v; setGalaXY(p=>({...p,galaxy:v})); }}
+          />
+          <span style={{ color:C.muted }}>S:</span>
+          <input type="number" min={1} max={499} style={{ ...css.input, width:"70px" }}
+            defaultValue={galaXYRef.current.system}
+            onChange={e=>{ const v=parseInt(e.target.value)||1; galaXYRef.current.system=v; setGalaXY(p=>({...p,system:v})); }}
+          />
+          <button style={css.btn("primary",loading)} disabled={loading} onClick={handleScanGalaxy}>
+            {loading?"SCANNING…":"SCAN"}
+          </button>
+        </div>
+        {galaxyEntries.length===0 ? (
+          <div style={{ color:C.muted, textAlign:"center", padding:"40px" }}>Enter coordinates and scan</div>
+        ) : (
+          <table style={css.table}>
+            <thead><tr>{["Pos","Name","Owner","Metal Mine","Distance"].map(h=><th key={h} style={css.th}>{h}</th>)}</tr></thead>
             <tbody>
-              {fleet.missions.map((m,i) => {
-                const eta = Math.max(0, m.arriveTs - now);
+              {galaxyEntries.map(e => {
+                const dist = planet ? galaxyDistance(planet.galaxy,planet.system,planet.position,e.galaxy,e.system,e.position) : 0;
                 return (
-                  <tr key={i} style={{ borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
-                    <td style={{ padding:"7px 8px" }}>
-                      <span style={{ padding:"2px 7px", fontFamily:"'Orbitron',sans-serif", fontSize:"0.57rem", fontWeight:700, border:"1px solid", color:mColors[m.missionType]||"var(--dim)", borderColor:mColors[m.missionType]||"var(--border)" }}>
-                        {mLabels[m.missionType]||"?"}
-                      </span>
-                    </td>
-                    <td style={{ padding:"7px 8px", fontFamily:"'Share Tech Mono',monospace", color:"var(--accent)", fontSize:"0.68rem" }}>{m.destination.slice(0,16)}…</td>
-                    <td style={{ padding:"7px 8px", fontFamily:"'Share Tech Mono',monospace", color:eta>0?"var(--accent3)":"var(--accent3)" }}>
-                      {eta>0 ? formatDuration(eta) : "✅ ARRIVED"}
-                    </td>
+                  <tr key={e.planetPda} style={{ background:e.isMe?`${C.accent}08`:"transparent" }}>
+                    <td style={{ ...css.td, color:C.accent }}>{e.position}</td>
+                    <td style={css.td}>{e.name}{e.isMe&&<span style={{ ...css.badge(C.accent2), marginLeft:"8px" }}>YOU</span>}</td>
+                    <td style={{ ...css.td, color:C.muted, fontSize:"11px" }}>{e.isMe?"—":e.owner.slice(0,8)+"…"}</td>
+                    <td style={{ ...css.td, color:C.metal }}>{e.metalMine}</td>
+                    <td style={{ ...css.td, color:C.muted }}>{dist?formatNum(dist):"—"}</td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        )}
+      </div>
+    );
+  }
+
+  // ── Layout ────────────────────────────────────────────────────────────────
+
+  const navItems = [
+    { page:"overview" as Page,  icon:"◎", label:"Overview"  },
+    { page:"buildings" as Page, icon:"⬡", label:"Buildings" },
+    { page:"shipyard" as Page,  icon:"🚀", label:"Shipyard"  },
+    { page:"fleet" as Page,     icon:"⚔", label:"Fleet"     },
+    { page:"galaxy" as Page,    icon:"✦", label:"Galaxy"    },
+  ];
+
+  return (
+    <div style={css.app}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap');
+        * { box-sizing: border-box; }
+        ::-webkit-scrollbar { width: 6px; background: ${C.bg}; }
+        ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+        button { transition: opacity 0.15s; }
+        button:hover:not(:disabled) { opacity: 0.8; }
+        @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.4} }
+        @keyframes er-glow { 0%,100%{box-shadow:0 0 6px ${C.er}44}50%{box-shadow:0 0 14px ${C.er}88} }
+      `}</style>
+
+      <header style={css.header}>
+        <h1 style={css.logo}>SOLAR GRID</h1>
+        <div style={{ display:"flex", alignItems:"center", gap:"12px" }}>
+          {loading && <span style={{ color:C.muted, animation:"pulse 1.5s infinite" }}>●</span>}
+
+          {/* ER Session button */}
+          {addresses && (
+            sessionActive ? (
+              <button
+                style={{ ...css.btn("er", txBusy), animation:"er-glow 2s ease-in-out infinite" }}
+                disabled={txBusy}
+                onClick={handleEndSession}
+                title="Commit state to Solana and end instant-action session"
+              >
+                ⚡ SAVE & EXIT SESSION
+              </button>
+            ) : (
+              <button
+                style={css.btn("er", txBusy||loading)}
+                disabled={txBusy||loading}
+                onClick={handleStartSession}
+                title="Delegate to Ephemeral Rollup for instant transactions (no wallet popups)"
+              >
+                ⚡ START SESSION
+              </button>
+            )
+          )}
+
+          {/* ER status badge */}
+          {sessionActive && (
+            <span style={{ ...css.badge(C.er), animation:"er-glow 2s ease-in-out infinite" }}>
+              ER ACTIVE
+            </span>
+          )}
+
+          <WalletMultiButton />
+        </div>
+      </header>
+
+      {!connected ? (
+        <div style={{ textAlign:"center", padding:"120px 20px", color:C.muted }}>
+          <div style={{ fontSize:"48px", marginBottom:"16px" }}>◎</div>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", color:C.accent, marginBottom:"8px" }}>SOLAR GRID</div>
+          <div>Connect your wallet to colonize the galaxy</div>
+        </div>
+      ) : !addresses ? (
+        <div style={{ maxWidth:"440px", margin:"80px auto", padding:"0 20px" }}>
+          <div style={css.card}>
+            <h2 style={{ color:C.accent, fontFamily:"'Orbitron',sans-serif", marginTop:0 }}>Establish Colony</h2>
+            {status && <StatusBar msg={status.msg} ok={status.ok} />}
+            <div style={{ marginBottom:"12px" }}>
+              <label style={{ color:C.muted, fontSize:"11px", letterSpacing:"1px" }}>PLANET NAME</label>
+              <input style={{ ...css.input, marginTop:"6px" }} value={planetName}
+                onChange={e=>setPlanetName(e.target.value)} placeholder="Homeworld" />
+            </div>
+            <button style={{ ...css.btn("primary",loading), width:"100%", padding:"12px", fontSize:"13px" }}
+              disabled={loading} onClick={handleCreate}>
+              {loading?"DEPLOYING… (3 txns)":"COLONIZE"}
+            </button>
+            <div style={{ color:C.muted, fontSize:"11px", marginTop:"10px", textAlign:"center" }}>
+              Requires 3 wallet approvals
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Resource bar */}
+          <div style={css.resBar}>
+            {[
+              { label:"⬡ METAL",   val:liveRes.metal,    cap:resources?.metal_cap,    color:C.metal   },
+              { label:"◈ CRYSTAL", val:liveRes.crystal,  cap:resources?.crystal_cap,  color:C.crystal },
+              { label:"◉ DEUT",    val:liveRes.deuterium,cap:resources?.deuterium_cap,color:C.deut    },
+            ].map(r=>(
+              <div key={r.label} style={css.resItem}>
+                <span style={{ color:C.muted, fontSize:"10px", letterSpacing:"1px" }}>{r.label}</span>
+                <span style={{ color:r.color, fontFamily:"'Orbitron',sans-serif", fontSize:"13px" }}>{formatBig(r.val)}</span>
+                <span style={{ color:C.muted, fontSize:"10px" }}>/ {formatBig(r.cap??0)}</span>
+              </div>
+            ))}
+            <div style={{ ...css.resItem, marginLeft:"auto" }}>
+              <span style={{ color:C.muted, fontSize:"10px" }}>⚡</span>
+              <span style={{ color:energyColor(energyProd,energyCons), fontSize:"12px" }}>{energyProd}/{energyCons}</span>
+            </div>
+          </div>
+
+          <div style={css.main}>
+            <aside style={css.sidebar}>
+              {navItems.map(n=>(
+                <button key={n.page} style={css.navBtn(page===n.page)}
+                  onClick={()=>{ setPage(n.page); if (n.page==="galaxy") handleScanGalaxy(); }}>
+                  <span>{n.icon}</span><span>{n.label}</span>
+                </button>
+              ))}
+              <div style={{ marginTop:"auto", padding:"16px", borderTop:`1px solid ${C.border}` }}>
+                <div style={{ color:C.muted, fontSize:"10px", letterSpacing:"1px", marginBottom:"4px" }}>COLONY</div>
+                <div style={{ color:C.text, fontSize:"12px" }}>{planet?.name||"—"}</div>
+                <div style={{ color:C.muted, fontSize:"10px", marginTop:"2px" }}>
+                  {planet?`${planet.galaxy}:${planet.system}:${planet.position}`:"—"}
+                </div>
+                {/* Session info at bottom of sidebar */}
+                <div style={{ marginTop:"8px", padding:"6px 8px", background: sessionActive?`${C.er}12`:`${C.border}44`,
+                  borderRadius:"3px", border:`1px solid ${sessionActive?C.er:C.border}44` }}>
+                  <div style={{ color:sessionActive?C.er:C.muted, fontSize:"10px" }}>
+                    {sessionActive?"⚡ ER ACTIVE":"● BASE MODE"}
+                  </div>
+                  <div style={{ color:C.muted, fontSize:"9px", marginTop:"2px" }}>
+                    {sessionActive?"Instant txns · No popups":"Click START SESSION"}
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            <main style={css.content}>
+              {status && <StatusBar msg={status.msg} ok={status.ok} />}
+              {page==="overview"  && <OverviewPage />}
+              {page==="buildings" && <BuildingsPage />}
+              {page==="shipyard"  && <ShipyardPage />}
+              {page==="fleet"     && <FleetPage />}
+              {page==="galaxy"    && <GalaxyPage />}
+            </main>
+          </div>
         </>
       )}
-
-      {fleet && fleet.missions.length === 0 && (
-        <div style={{ color:"var(--dim)", fontSize:"0.8rem", padding:"20px 0" }}>No active missions</div>
-      )}
     </div>
   );
-}
-
-function GalaxyPage({ planet }: { planet: OnChainPlanet|null }) {
-  const [galaxy, setGalaxy] = useState(planet?.galaxy || 1);
-  const [system, setSystem] = useState(planet?.system || 47);
-  const rows = Array.from({length:15},(_,i)=>i+1).map(pos => {
-    const isMe = planet && pos===planet.position && system===planet.system && galaxy===planet.galaxy;
-    const hasPlayer = isMe || Math.random()>0.45;
-    return { pos, name:isMe?planet.name:(hasPlayer?["Nova Station","Iron Forge","Crystal Haven","Dust Rim","Ember World"][pos%5]:"—"), player:isMe?"You":(hasPlayer?["Zephyros","AstroKing","StarLord"][pos%3]:""), isMe:!!isMe };
-  });
-  return (
-    <div>
-      <PageTitle>🌌 Galaxy</PageTitle>
-      <div style={{ display:"flex", gap:10, alignItems:"center", marginBottom:16 }}>
-        <span style={{ fontSize:"0.7rem", color:"var(--dim)" }}>Galaxy</span>
-        <input type="number" min={1} max={9} value={galaxy} onChange={e=>setGalaxy(+e.target.value)} style={{ width:60, padding:"5px 8px", fontSize:"0.8rem" }} />
-        <span style={{ fontSize:"0.7rem", color:"var(--dim)" }}>System</span>
-        <input type="number" min={1} max={499} value={system} onChange={e=>setSystem(+e.target.value)} style={{ width:70, padding:"5px 8px", fontSize:"0.8rem" }} />
-      </div>
-      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:"0.73rem" }}>
-        <thead><tr style={{ borderBottom:"1px solid var(--border)" }}>
-          {["POS","PLANET","PLAYER","ACTIONS"].map(h=><th key={h} style={{ padding:"6px 8px", textAlign:"left", fontFamily:"'Orbitron',sans-serif", fontSize:"0.57rem", letterSpacing:"0.1em", color:"var(--dim)" }}>{h}</th>)}
-        </tr></thead>
-        <tbody>
-          {rows.map(r=>(
-            <tr key={r.pos} style={{ borderBottom:"1px solid rgba(255,255,255,0.04)", background:r.isMe?"rgba(0,212,255,0.04)":"transparent" }}>
-              <td style={{ padding:"8px", color:"var(--dim)", fontFamily:"'Share Tech Mono',monospace" }}>{r.pos}</td>
-              <td style={{ padding:"8px", color:r.isMe?"var(--accent3)":"var(--text)" }}>{r.name}{r.isMe?" ★":""}</td>
-              <td style={{ padding:"8px", color:r.isMe?"var(--accent3)":"var(--crystal)" }}>{r.player||"—"}</td>
-              <td style={{ padding:"8px" }}>
-                {r.player && !r.isMe && (
-                  <div style={{ display:"flex", gap:4 }}>
-                    <button style={{ padding:"3px 8px", background:"rgba(255,51,85,0.1)", border:"1px solid rgba(255,51,85,0.4)", color:"var(--red)", fontSize:"0.62rem", cursor:"pointer" }}>⚔</button>
-                    <button style={{ padding:"3px 8px", background:"rgba(0,212,255,0.05)", border:"1px solid var(--border)", color:"var(--dim)", fontSize:"0.62rem", cursor:"pointer" }}>👁</button>
-                  </div>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function MessagesPage() {
-  return (
-    <div>
-      <PageTitle>📡 Messages</PageTitle>
-      <div style={{ color:"var(--dim)", fontSize:"0.8rem", padding:"20px 0" }}>
-        No messages yet. Messages will appear here when fleets arrive, battles resolve, or buildings complete.
-      </div>
-    </div>
-  );
-}
-
-// ── Shared UI ─────────────────────────────────────────────────────────────────
-function PageTitle({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontFamily:"'Orbitron',sans-serif", fontWeight:700, fontSize:"1rem", color:"var(--accent)", letterSpacing:"0.1em", marginBottom:18, display:"flex", alignItems:"center", gap:12 }}>{children}<div style={{ flex:1, height:1, background:"linear-gradient(90deg,var(--bhi),transparent)" }} /></div>;
-}
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:"0.65rem", fontWeight:600, letterSpacing:"0.12em", color:"var(--dim)", marginBottom:10, paddingBottom:6, borderBottom:"1px solid var(--border)" }}>{children}</div>;
-}
-function CostPill({ label, val, ok }: { label:string; val:number; ok:boolean }) {
-  return <span style={{ display:"inline-flex", alignItems:"center", gap:2, fontFamily:"'Share Tech Mono',monospace", fontSize:"0.6rem", padding:"2px 5px", background:"rgba(0,0,0,0.3)", border:`1px solid ${ok?"rgba(255,255,255,0.06)":"rgba(255,51,85,0.35)"}`, color:ok?"var(--text)":"var(--red)", borderRadius:2 }}>{label} {formatNum(val)}</span>;
 }
