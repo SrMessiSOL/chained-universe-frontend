@@ -1,5 +1,6 @@
 import { PublicKey } from "@solana/web3.js";
 
+<<<<<<< HEAD
 export const PROGRAM_IDS = {
   componentPlanet:    new PublicKey("GSQbXfwxMWkW2bGASsKe4i8WupDPMRCLybZHRPJoXC6P"),
   componentFleet:     new PublicKey("CsHSUWnCL4rTi9WYcVRXyy2Sq9TgcH4Lr7WcZNViG5NY"),
@@ -15,11 +16,28 @@ export const PROGRAM_IDS = {
   systemShipyard:     new PublicKey("74wxuTRib19TzJyXNaeyPVcsFFFqBq8phtRSSPDsK2q2"),
   systemSession:      new PublicKey("BHRu4DADM4NsJvnvqY5znDUsrdvTrnkKyee9eYZ7Yd9G"),
 } as const;
+=======
+// ── Program IDs ───────────────────────────────────────────────────────────────
+export const WORLD_PROGRAM_ID       = new PublicKey("WorLD15A7CrDwLcLy4fRqtaTb9fbd8o8iqiEMUDse2n");
+export const COMPONENT_PLANET_ID    = new PublicKey("4AAQeP54KQy4HSjMsMS9VwVY8mWy4BisdsTwSxen4Df6");
+export const COMPONENT_RESOURCES_ID = new PublicKey("CP6KoShdHvgZbGubYLct1EcQLmngZ1nsWmaKQhbJRtss");
+export const COMPONENT_FLEET_ID     = new PublicKey("5UuCSuNqVXwCd7qPFQXj8Kp7DAqbB5ZuHFLZZ32paPLD");
+export const SYSTEM_INITIALIZE_ID   = new PublicKey("BvTJfpb1KMtBiKQhcNVvHJnKZAvoRALrm4GYQ2Uz36TX");
+export const SYSTEM_PRODUCE_ID      = new PublicKey("EkNaTMh1N29W6PCXDGnvh7mVzcrA1pMS3uz2xKWRUZRH");
+export const SYSTEM_BUILD_ID        = new PublicKey("kk7e2mNXHaU3VVtmtzLCZGYP88MDL7EbkFbb9sySfiV");
+export const SYSTEM_LAUNCH_ID       = new PublicKey("9aHGFS8VAfbEYYCkEGQBBuTKApkD5aiHotH77kMgB5bT");
+export const SYSTEM_SHIPYARD_ID     = new PublicKey("FTav8UK4RKawqyGWRakZhe1zhYV7PUJgPwHK7UnEqnN9");
+export const SYSTEM_ATTACK_ID       = new PublicKey("8qbBLEdrN6qC1fFJQLM7a6Jqf2xfoDNfSmTQopMELSGm");
+>>>>>>> 1d25215687246c877ab376ad413894febd400d90
 
 // ── Ephemeral Rollup (replace with your deployed system-session program ID) ───
 // After deploying system-session: `anchor deploy --program-name system-session`
 // then paste the resulting program ID here.
+<<<<<<< HEAD
 export const SYSTEM_SESSION_ID      = new PublicKey("BHRu4DADM4NsJvnvqY5znDUsrdvTrnkKyee9eYZ7Yd9G");
+=======
+export const SYSTEM_SESSION_ID      = new PublicKey("EASuSJPK7oY4wjgD5b4XUkkFw7Wp3gCwSzY3u7qwuaHj");
+>>>>>>> 1d25215687246c877ab376ad413894febd400d90
 
 // MagicBlock Delegation Program — same address on all clusters
 export const DELEGATION_PROGRAM_ID  = new PublicKey("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");
@@ -53,7 +71,11 @@ export const ER_VALIDATORS = {
 };
 
 // ── Shared World PDA ──────────────────────────────────────────────────────────
+<<<<<<< HEAD
 export const SHARED_WORLD_PDA_STR = new PublicKey("3n7wse9VnG1g7smAPuepZnaqLc4AAURoWicYEsZeSoi2");
+=======
+export const SHARED_WORLD_PDA_STR = new PublicKey("2kGgN2BfqMdwsmdDE5TZdyqe5rCsUg27RFfH2x2i35WR");
+>>>>>>> 1d25215687246c877ab376ad413894febd400d90
 
 // ── Building definitions ──────────────────────────────────────────────────────
 export const BUILDINGS = [
@@ -95,4 +117,8 @@ export const SHIP_TYPES: Record<string, number> = {
   cruiser: 4, battleship: 5, battlecruiser: 6, bomber: 7,
   destroyer: 8, deathstar: 9, recycler: 10, espionageProbe: 11,
   colonyShip: 12, solarSatellite: 13,
+<<<<<<< HEAD
 };
+=======
+};
+>>>>>>> 1d25215687246c877ab376ad413894febd400d90
