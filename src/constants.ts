@@ -1,0 +1,98 @@
+import { PublicKey } from "@solana/web3.js";
+
+export const PROGRAM_IDS = {
+  componentPlanet:    new PublicKey("GSQbXfwxMWkW2bGASsKe4i8WupDPMRCLybZHRPJoXC6P"),
+  componentFleet:     new PublicKey("CsHSUWnCL4rTi9WYcVRXyy2Sq9TgcH4Lr7WcZNViG5NY"),
+  componentResources: new PublicKey("66QnMWuqE9B8vE9iSP1qWMk8R2yybci4NNJtdL3xiGjW"),
+  componentResearch:  new PublicKey("EC83xSy52aXakXJFqgXni5Ked9TSo8QmQff1pjtumTbG"),
+  systemInitialize:   new PublicKey("GHBGdcof2e5tsPe2vP3zJYNxJscojY7J7gdRXCsgdpY9"),
+  systemProduce:      new PublicKey("DNNJg4A1yirXgUN5cdJ4ozuG8zJVkmxB2AsWvTqVsbk4"),
+  systemBuild:        new PublicKey("E94HChSfw57Px2BJPKLnoaj17v6NKN7vXnoQGLSpxUve"),
+  systemResearch:     new PublicKey("CXwXVUeovhbpXGWpHk56SgrnH2DwoqoTSErgtrJghK5Z"),
+  systemLaunch:       new PublicKey("BVn9NZ51LqhbDowqhaJvxmXK6VGsP1k3dLtJEL8Fjmxv"),
+  systemResolveColonize: new PublicKey("AuYuVgjpX64Fea3zGtUaEHjoewwyWBeT8Srsh8EXFhGL"),
+  systemResolveTransport: new PublicKey("DkzcueEX3ca9haAmFoHKsW7JQVFxBfeZJX1VdHSdPnYP"),
+  systemShipyard:     new PublicKey("74wxuTRib19TzJyXNaeyPVcsFFFqBq8phtRSSPDsK2q2"),
+  systemSession:      new PublicKey("BHRu4DADM4NsJvnvqY5znDUsrdvTrnkKyee9eYZ7Yd9G"),
+} as const;
+
+// ── Ephemeral Rollup (replace with your deployed system-session program ID) ───
+// After deploying system-session: `anchor deploy --program-name system-session`
+// then paste the resulting program ID here.
+export const SYSTEM_SESSION_ID      = new PublicKey("BHRu4DADM4NsJvnvqY5znDUsrdvTrnkKyee9eYZ7Yd9G");
+
+// MagicBlock Delegation Program — same address on all clusters
+export const DELEGATION_PROGRAM_ID  = new PublicKey("DELeGGvXpWV2fqJUhqcF5ZSYMS4JTLjteaAMARRSaeSh");
+
+// Magic Context program — used internally by commit_and_undelegate_accounts
+export const MAGIC_CONTEXT_PROGRAM_ID = new PublicKey("MagicContext1111111111111111111111111111111");
+
+// ── ER RPC Endpoints ──────────────────────────────────────────────────────────
+// Magic Router: single endpoint that automatically routes to base layer or ER
+// based on whether the destination accounts are currently delegated.
+// Use this for all game actions after startSession().
+export const ER_RPC = "https://devnet-router.magicblock.app";
+
+// Direct ER endpoint (for reading ER state when needed)
+export const ER_DIRECT_RPC = "https://devnet.magicblock.app";
+
+// ── ER Validator pubkeys (choose one based on player location) ────────────────
+// Pass as validatorPubkey to startSession() for lower latency.
+// Default (no arg) = ER picks automatically.
+export const ER_VALIDATORS = {
+  devnet: {
+    us:   new PublicKey("MUS3hc9TCw4cGC12vHNoYcCGzJG1txjgQLZWVoeNHNd"),
+    eu:   new PublicKey("MEUGGrYPxKk17hCr7wpT6s8dtNokZj5U2L57vjYMS8e"),
+    asia: new PublicKey("MAS1Dt9qreoRMQ14YQuhg8UTZMMzDdKhmkZMECCzk57"),
+  },
+  mainnet: {
+    us:   new PublicKey("MUS3hc9TCw4cGC12vHNoYcCGzJG1txjgQLZWVoeNHNd"),
+    eu:   new PublicKey("MEUGGrYPxKk17hCr7wpT6s8dtNokZj5U2L57vjYMS8e"),
+    asia: new PublicKey("MAS1Dt9qreoRMQ14YQuhg8UTZMMzDdKhmkZMECCzk57"),
+  },
+};
+
+// ── Shared World PDA ──────────────────────────────────────────────────────────
+export const SHARED_WORLD_PDA_STR = new PublicKey("3n7wse9VnG1g7smAPuepZnaqLc4AAURoWicYEsZeSoi2");
+
+// ── Building definitions ──────────────────────────────────────────────────────
+export const BUILDINGS = [
+  { idx: 0,  key: "metalMine",            name: "Metal Mine",            icon: "⬡",  desc: "Extracts metal from the planet crust." },
+  { idx: 1,  key: "crystalMine",          name: "Crystal Mine",          icon: "◈",  desc: "Processes surface crystal formations." },
+  { idx: 2,  key: "deuteriumSynthesizer", name: "Deuterium Synthesizer", icon: "◉",  desc: "Extracts deuterium from the atmosphere." },
+  { idx: 3,  key: "solarPlant",           name: "Solar Plant",           icon: "☀",  desc: "Converts sunlight to energy." },
+  { idx: 4,  key: "fusionReactor",        name: "Fusion Reactor",        icon: "⚛",  desc: "Burns deuterium for high-yield energy." },
+  { idx: 5,  key: "roboticsFactory",      name: "Robotics Factory",      icon: "🤖", desc: "Automated workers — halves build time." },
+  { idx: 6,  key: "naniteFactory",        name: "Nanite Factory",        icon: "🔬", desc: "Nano assemblers — massive build speed." },
+  { idx: 7,  key: "shipyard",             name: "Shipyard",              icon: "🚀", desc: "Constructs ships and defense units." },
+  { idx: 8,  key: "metalStorage",         name: "Metal Storage",         icon: "🏗", desc: "Increases metal cap." },
+  { idx: 9,  key: "crystalStorage",       name: "Crystal Storage",       icon: "🏗", desc: "Increases crystal cap." },
+  { idx: 10, key: "deuteriumTank",        name: "Deuterium Tank",        icon: "🏗", desc: "Increases deuterium cap." },
+  { idx: 11, key: "researchLab",          name: "Research Lab",          icon: "🔭", desc: "Required for all technology research." },
+  { idx: 12, key: "missileSilo",          name: "Missile Silo",          icon: "🎯", desc: "Stores interplanetary missiles." },
+] as const;
+
+// ── Ship definitions ──────────────────────────────────────────────────────────
+export const SHIPS = [
+  { key: "smallCargo",     name: "Small Cargo",      icon: "📦", atk: 5,       cargo: 5_000,   cost: { m: 2000,    c: 2000,    d: 0       } },
+  { key: "largeCargo",     name: "Large Cargo",      icon: "🚛", atk: 5,       cargo: 25_000,  cost: { m: 6000,    c: 6000,    d: 0       } },
+  { key: "lightFighter",   name: "Light Fighter",    icon: "✈",  atk: 50,      cargo: 50,      cost: { m: 3000,    c: 1000,    d: 0       } },
+  { key: "heavyFighter",   name: "Heavy Fighter",    icon: "⚡",  atk: 150,     cargo: 100,     cost: { m: 6000,    c: 4000,    d: 0       } },
+  { key: "cruiser",        name: "Cruiser",          icon: "🛸", atk: 400,     cargo: 800,     cost: { m: 20000,   c: 7000,    d: 2000    } },
+  { key: "battleship",     name: "Battleship",       icon: "⚔",  atk: 1000,    cargo: 1500,    cost: { m: 45000,   c: 15000,   d: 0       } },
+  { key: "battlecruiser",  name: "Battlecruiser",    icon: "🔱", atk: 700,     cargo: 750,     cost: { m: 30000,   c: 40000,   d: 15000   } },
+  { key: "bomber",         name: "Bomber",           icon: "💣", atk: 1000,    cargo: 500,     cost: { m: 50000,   c: 25000,   d: 15000   } },
+  { key: "destroyer",      name: "Destroyer",        icon: "💥", atk: 2000,    cargo: 2000,    cost: { m: 60000,   c: 50000,   d: 15000   } },
+  { key: "deathstar",      name: "Deathstar",        icon: "🌑", atk: 200000,  cargo: 1000000, cost: { m: 5000000, c: 4000000, d: 1000000 } },
+  { key: "recycler",       name: "Recycler",         icon: "♻",  atk: 1,       cargo: 20_000,  cost: { m: 10000,   c: 6000,    d: 2000    } },
+  { key: "espionageProbe", name: "Espionage Probe",  icon: "👁",  atk: 0,       cargo: 0,       cost: { m: 0,       c: 1000,    d: 0       } },
+  { key: "colonyShip",     name: "Colony Ship",      icon: "🌍", atk: 50,      cargo: 7500,    cost: { m: 10000,   c: 20000,   d: 10000   } },
+  { key: "solarSatellite", name: "Solar Satellite",  icon: "🛰",  atk: 1,       cargo: 0,       cost: { m: 0,       c: 2000,    d: 500     } },
+] as const;
+
+export const SHIP_TYPES: Record<string, number> = {
+  smallCargo: 0, largeCargo: 1, lightFighter: 2, heavyFighter: 3,
+  cruiser: 4, battleship: 5, battlecruiser: 6, bomber: 7,
+  destroyer: 8, deathstar: 9, recycler: 10, espionageProbe: 11,
+  colonyShip: 12, solarSatellite: 13,
+};
