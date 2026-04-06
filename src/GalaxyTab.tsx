@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import GalaxyMap from "./GalaxyMap";
-import { GameClient, Planet } from "./game";
+import { GameClient, Planet } from "./game-state";
 
 interface GalaxyTabProps {
   client: GameClient | null;

@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -22,20 +21,3 @@ export default defineConfig({
     },
   },
 })
-=======
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
-
-export default defineConfig({
-  plugins: [react()],
-  define: {
-    "process.env": {},
-    global: "globalThis",
-  },
-  resolve: {
-    alias: {
-      buffer: "buffer",
-    },
-  },
-});
->>>>>>> 1d25215687246c877ab376ad413894febd400d90

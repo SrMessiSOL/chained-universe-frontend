@@ -11,8 +11,9 @@ import {
   LAMPORTS_PER_SOL,
   AccountMeta,
 } from "@solana/web3.js";
-import { AnchorProvider, setProvider } from "@coral-xyz/anchor";
+import { AnchorProvider, Program, Idl, setProvider } from "@coral-xyz/anchor";
 import { anchor as BoltAnchor, AddEntity, InitializeComponent, ApplySystem, createDelegateInstruction, createUndelegateInstruction } from "@magicblock-labs/bolt-sdk";
+import { GetCommitmentSignature } from "@magicblock-labs/ephemeral-rollups-sdk";
 
 export const ER_DIRECT_RPC = "https://devnet.magicblock.app";
 
@@ -42,6 +43,8 @@ export const RPC_ENDPOINT     = "https://api.devnet.solana.com";
 export const ER_RPC           = "https://devnet-router.magicblock.app";
 
 export const REGISTRY_PROGRAM_ID = new PublicKey("BV6JwMdA9gLfG5ut2VBzbmQoJTXUu5umXErBqv4V3PJq");
+const MAGIC_PROGRAM_ID = new PublicKey("Magic11111111111111111111111111111111111111");
+const MAGIC_CONTEXT_ID = new PublicKey("MagicContext1111111111111111111111111111111");
 
 // ─── Data types ───────────────────────────────────────────────────────────────
 export interface Mission {
@@ -177,6 +180,15 @@ export type ProgressReporter = (message: string) => void;
 
 const TRANSPORT_MISSION = 2;
 const COLONIZE_MISSION = 5;
+const ER_AUTO_COMMIT_FREQUENCY_MS = 1_000;
+const COMMIT_SIGNATURE_POLL_ATTEMPTS = 8;
+const COMMIT_SIGNATURE_POLL_DELAY_MS = 1_500;
+const COMMIT_STATE_COMPARE_ATTEMPTS = 6;
+const COMMIT_STATE_COMPARE_DELAY_MS = 1_500;
+const COMMIT_PLANET = 1 << 0;
+const COMMIT_RESOURCES = 1 << 1;
+const COMMIT_FLEET = 1 << 2;
+const COMMIT_RESEARCH = 1 << 3;
 const BASE_LAUNCH_ARGS_LEN = 94;
 const TARGET_COORDS_LEN = 5;
 const TRANSPORT_TARGET_ARGS_LEN = 5;
@@ -314,8 +326,88 @@ export class GameClient {
     (BoltAnchor as any).setProvider(boltProvider);
   }
 
-  private chunkInstructionGroups(
-    instructionGroups: TransactionInstruction[][],
+  private restoreStoredBurner(): Keypair | null {
+    try {
+      const sessionStored = sessionStorage.getItem("_er_burner");
+      if (sessionStored) {
+        const secretKey = Uint8Array.from(JSON.parse(sessionStored));
+        return Keypair.fromSecretKey(secretKey);
+      }
+
+      // Migration path for burners written by the newer localStorage-based flow.
+      const legacyStored = localStorage.getItem("_er_burner");
+      if (!legacyStored) return null;
+
+      sessionStorage.setItem("_er_burner", legacyStored);
+      localStorage.removeItem("_er_burner");
+      const secretKey = Uint8Array.from(JSON.parse(legacyStored));
+      return Keypair.fromSecretKey(secretKey);
+    } catch (e) {
+      console.warn("[SESSION] Could not restore stored burner:", e);
+      return null;
+    }
+  }
+
+  private persistBurner(burner: Keypair): void {
+    try {
+      sessionStorage.setItem("_er_burner", JSON.stringify(Array.from(burner.secretKey)));
+      try { localStorage.removeItem("_er_burner"); } catch {}
+    } catch (e) {
+      console.warn("[SESSION] Could not persist burner (non-fatal):", e);
+    }
+  }
+
+  private clearStoredBurner(): void {
+    try { sessionStorage.removeItem("_er_burner"); } catch {}
+    try { localStorage.removeItem("_er_burner"); } catch {}
+  }
+
+  private async ensureSessionBurner(reportProgress?: ProgressReporter): Promise<Keypair> {
+    if (this.erSigner) {
+      this.sessionActive = true;
+      return this.erSigner;
+    }
+
+    const restored = this.restoreStoredBurner();
+    if (restored) {
+      this.erSigner = restored;
+      this.sessionActive = true;
+      return restored;
+    }
+
+    const payer = this.provider.wallet.publicKey;
+    const burner = Keypair.generate();
+    reportProgress?.("Signing with wallet: funding always-on ER burner");
+
+    const fundTx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer,
+        toPubkey: burner.publicKey,
+        lamports: 10_000_000,
+      })
+    );
+    const fundSig = await this.provider.sendAndConfirm(fundTx, []);
+    console.log("[SESSION] Burner funded for always-on delegation:", fundSig);
+
+    this.erSigner = burner;
+    this.sessionActive = true;
+    this.persistBurner(burner);
+    return burner;
+  }
+
+  private async enableAlwaysOnDelegation(
+    entityPda: PublicKey,
+    componentProgramIds: PublicKey[],
+    reportProgress?: ProgressReporter,
+  ): Promise<void> {
+    await this.ensureSessionBurner(reportProgress);
+    reportProgress?.("Signing with wallet: delegating planet to ER");
+    await this.delegateEntityComponents(entityPda, componentProgramIds);
+    this.sessionActive = true;
+  }
+
+  private chunkInstructions(
+    instructions: TransactionInstruction[],
     feePayer: PublicKey,
     prefixIxs: TransactionInstruction[] = [],
   ): TransactionInstruction[][] {
@@ -335,22 +427,22 @@ export class GameClient {
       }
     };
 
-    for (const group of instructionGroups) {
-      const nextBatch = [...currentBatch, ...group];
+    for (const instruction of instructions) {
+      const nextBatch = [...currentBatch, instruction];
       if (fitsInTransaction(nextBatch)) {
         currentBatch = nextBatch;
         continue;
       }
 
       if (currentBatch.length === 0) {
-        throw new Error("A single planet's delegation instructions do not fit in one transaction.");
+        throw new Error("A single delegation instruction does not fit in one transaction.");
       }
 
       batches.push(currentBatch);
-      currentBatch = [...group];
+      currentBatch = [instruction];
 
       if (!fitsInTransaction(currentBatch)) {
-        throw new Error("A single planet's delegation instructions do not fit in one transaction.");
+        throw new Error("A single delegation instruction does not fit in one transaction.");
       }
     }
 
@@ -761,6 +853,9 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     initializedPlanet.position,
   );
 
+  reportProgress?.("Signing with wallet: funding and delegating the Homeworld to ER");
+  await this.enableAlwaysOnDelegation(entityPda, components, reportProgress);
+
   // 5. Load final state
   const state = await this.findPlanet(payer);
   if (!state) {
@@ -777,20 +872,24 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     args.writeUInt8(0, 0);
     args.writeUInt8(buildingIdx, 1);
     args.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 2);
-    return this.applySystem("start_build", entityPda, PROGRAM_IDS.systemBuild, [
+    const actionSig = await this.applySystem("start_build", entityPda, PROGRAM_IDS.systemBuild, [
       { componentId: PROGRAM_IDS.componentPlanet },
       { componentId: PROGRAM_IDS.componentResources },
     ], args);
+    await this.commitSelected(entityPda, COMMIT_PLANET | COMMIT_RESOURCES, "start_build");
+    return actionSig;
   }
 
   async finishBuild(entityPda: PublicKey): Promise<string> {
     const args = Buffer.alloc(10);
     args.writeUInt8(1, 0);
     args.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 2);
-    return this.applySystem("finish_build", entityPda, PROGRAM_IDS.systemBuild, [
+    const actionSig = await this.applySystem("finish_build", entityPda, PROGRAM_IDS.systemBuild, [
       { componentId: PROGRAM_IDS.componentPlanet },
       { componentId: PROGRAM_IDS.componentResources },
     ], args);
+    await this.commitSelected(entityPda, COMMIT_PLANET | COMMIT_RESOURCES, "finish_build");
+    return actionSig;
   }
 
   async startResearch(entityPda: PublicKey, techIdx: number): Promise<string> {
@@ -798,11 +897,13 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     args.writeUInt8(0, 0);
     args.writeUInt8(techIdx, 1);
     args.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 2);
-    return this.applySystem("start_research", entityPda, PROGRAM_IDS.systemResearch, [
+    const actionSig = await this.applySystem("start_research", entityPda, PROGRAM_IDS.systemResearch, [
       { componentId: PROGRAM_IDS.componentPlanet },
       { componentId: PROGRAM_IDS.componentResources },
       { componentId: PROGRAM_IDS.componentResearch },
     ], args);
+    await this.commitSelected(entityPda, COMMIT_PLANET | COMMIT_RESOURCES | COMMIT_RESEARCH, "start_research");
+    return actionSig;
   }
 
   async finishResearch(entityPda: PublicKey): Promise<string> {
@@ -810,11 +911,13 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     args.writeUInt8(1, 0);
     args.writeUInt8(0, 1);
     args.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 2);
-    return this.applySystem("finish_research", entityPda, PROGRAM_IDS.systemResearch, [
+    const actionSig = await this.applySystem("finish_research", entityPda, PROGRAM_IDS.systemResearch, [
       { componentId: PROGRAM_IDS.componentPlanet },
       { componentId: PROGRAM_IDS.componentResources },
       { componentId: PROGRAM_IDS.componentResearch },
     ], args);
+    await this.commitSelected(entityPda, COMMIT_PLANET | COMMIT_RESOURCES | COMMIT_RESEARCH, "finish_research");
+    return actionSig;
   }
 
   async buildShip(entityPda: PublicKey, shipType: number, quantity: number): Promise<string> {
@@ -840,11 +943,13 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
   args.writeUInt32LE(quantity, 1);
   args.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 5);
 
-  return this.applySystem("build_ship", entityPda, PROGRAM_IDS.systemShipyard, [
+  const actionSig = await this.applySystem("build_ship", entityPda, PROGRAM_IDS.systemShipyard, [
     { componentId: PROGRAM_IDS.componentFleet },
     { componentId: PROGRAM_IDS.componentResources },
     { componentId: PROGRAM_IDS.componentResearch },
   ], args);
+  await this.commitSelected(entityPda, COMMIT_FLEET | COMMIT_RESOURCES | COMMIT_RESEARCH, "build_ship");
+  return actionSig;
 }
 
   async launchFleet(
@@ -900,10 +1005,12 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       );
     }
 
-    return this.applySystem("launch_fleet", entityPda, PROGRAM_IDS.systemLaunch, [
+    const actionSig = await this.applySystem("launch_fleet", entityPda, PROGRAM_IDS.systemLaunch, [
       { componentId: PROGRAM_IDS.componentFleet },
       { componentId: PROGRAM_IDS.componentResources },
     ], args);
+    await this.commitSelected(entityPda, COMMIT_FLEET | COMMIT_RESOURCES, "launch_fleet");
+    return actionSig;
   }
 
   async resolveTransport(
@@ -929,7 +1036,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     args.writeUInt8(slot, 0);
     args.writeBigInt64LE(BigInt(now), 1);
 
-    return this.applySystemForEntities(
+    const actionSig = await this.applySystemForEntities(
       "resolve_transport",
       [
         {
@@ -947,6 +1054,9 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       PROGRAM_IDS.systemResolveTransport,
       args,
     );
+    await this.commitSelected(sourceEntityPda, COMMIT_FLEET, "resolve_transport_source");
+    await this.commitSelected(destinationEntityPda, COMMIT_PLANET | COMMIT_RESOURCES, "resolve_transport_destination");
+    return actionSig;
   }
 
   private async resolveTransportDestinationEntity(
@@ -999,6 +1109,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     mission: Mission,
     slot: number,
     now = Math.floor(Date.now() / 1000),
+    reportProgress?: ProgressReporter,
   ): Promise<{ entityPda: PublicKey; planetPda: PublicKey; registerSig: string; resolveSig: string; initializeSig: string }> {
     const wallet = this.provider.wallet.publicKey;
     const planetCount = await this.fetchPlanetCount(wallet);
@@ -1008,6 +1119,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     resolveArgs.writeUInt8(slot, 0);
     resolveArgs.writeBigInt64LE(BigInt(now), 1);
 
+    reportProgress?.("Signing with wallet: creating colony entity and components");
     const addEntityResult = await AddEntity({
       payer: wallet,
       world: SHARED_WORLD_PDA,
@@ -1043,10 +1155,6 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
     await this.provider.sendAndConfirm(initTx, [], { commitment: "confirmed" });
 
-    if (this.sessionActive) {
-      await this.delegateEntityComponents(colonyEntityPda, colonyComponentIds);
-    }
-
     const initializeArgs = Buffer.alloc(INIT_NEW_COLONY_ARGS_LEN, 0);
     initializeArgs.writeBigInt64LE(BigInt(now), 0);
     initializeArgs.writeUInt16LE(mission.targetGalaxy, 8);
@@ -1059,6 +1167,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     initializeArgs.writeBigUInt64LE(missionCargo.crystal, 89);
     initializeArgs.writeBigUInt64LE(missionCargo.deuterium, 97);
 
+    reportProgress?.("Signing session transaction: initializing the new colony");
     const initializeSig = await this.applySystem(
       "initialize_new_colony",
       colonyEntityPda,
@@ -1066,8 +1175,14 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       colonyInitializeComponents,
       initializeArgs,
     );
+    await this.commitSelected(
+      colonyEntityPda,
+      COMMIT_PLANET | COMMIT_RESOURCES | COMMIT_FLEET | COMMIT_RESEARCH,
+      "initialize_new_colony",
+    );
 
     const colonyPlanetPda = deriveComponentPda(colonyEntityPda, PROGRAM_IDS.componentPlanet);
+    reportProgress?.("Signing with wallet: registering the colony planet");
     const registerSig = await this.registerPlanet(
       colonyEntityPda,
       colonyPlanetPda,
@@ -1076,6 +1191,9 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       mission.targetPosition,
     );
 
+    await this.enableAlwaysOnDelegation(colonyEntityPda, colonyComponentIds, reportProgress);
+
+    reportProgress?.("Signing session transaction: resolving colonize mission");
     const resolveSig = await this.applySystem(
       "resolve_colonize",
       sourceEntityPda,
@@ -1083,6 +1201,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       [{ componentId: PROGRAM_IDS.componentFleet }],
       resolveArgs,
     );
+    await this.commitSelected(sourceEntityPda, COMMIT_FLEET, "resolve_colonize");
 
     return { entityPda: colonyEntityPda, planetPda: colonyPlanetPda, registerSig, resolveSig, initializeSig };
   }
@@ -1100,21 +1219,16 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
   restoreSession(): void {
     console.log("[CLIENT] Restoring session from on-chain delegation...");
     this.sessionActive = true;
-    try {
-      const stored = sessionStorage.getItem("_er_burner");
-      if (stored) {
-        const secretKey = Uint8Array.from(JSON.parse(stored));
-        this.erSigner   = Keypair.fromSecretKey(secretKey);
-        console.log("[CLIENT] ✓ Burner recovered from sessionStorage:", this.erSigner.publicKey.toBase58());
-      } else {
-        console.log("[CLIENT] No burner in sessionStorage — wallet will sign for endSession");
-      }
-    } catch (e) {
-      console.warn("[CLIENT] Could not restore burner:", e);
+    const burner = this.restoreStoredBurner();
+    if (burner) {
+      this.erSigner = burner;
+      console.log("[CLIENT] Burner recovered from browser session storage:", burner.publicKey.toBase58());
+    } else {
+      console.log("[CLIENT] No stored burner found; delegated planets are detected, but ER actions will need wallet signatures until a new burner is created.");
     }
   }
 
-  async startSession(entityPda: PublicKey): Promise<void> {
+  async startSession(entityPda: PublicKey, reportProgress?: ProgressReporter): Promise<void> {
     const payer = this.provider.wallet.publicKey;
     const sessionTargets = await this.getSessionTargets(entityPda);
 
@@ -1141,6 +1255,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     const burner = Keypair.generate();
     console.log("[SESSION] Burner keypair:", burner.publicKey.toBase58());
 
+    reportProgress?.("Signing with wallet: funding session burner wallet");
     const fundTx = new Transaction().add(
       SystemProgram.transfer({
         fromPubkey: payer,
@@ -1157,28 +1272,47 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
         account:      componentPda,
         ownerProgram: componentProgramId,
         payer,
-      });
+      }, ER_AUTO_COMMIT_FREQUENCY_MS);
 
-    const delegateGroups = sessionTargets.map((target) => ([
+    const delegateInstructions = sessionTargets.flatMap((target) => ([
       buildDelegateIx(target.entityPda, PROGRAM_IDS.componentPlanet, target.planetPda),
       buildDelegateIx(target.entityPda, PROGRAM_IDS.componentResources, target.resourcesPda),
       buildDelegateIx(target.entityPda, PROGRAM_IDS.componentFleet, target.fleetPda),
       buildDelegateIx(target.entityPda, PROGRAM_IDS.componentResearch, target.researchPda),
     ]));
 
-    const delegateBatches = this.chunkInstructionGroups(
-      delegateGroups,
-      payer,
-      [
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
-      ],
-    );
+    const delegatePrefixIxs = [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
+    ];
+    let delegateBatches: TransactionInstruction[][];
+    try {
+      const singleTx = new Transaction();
+      singleTx.feePayer = payer;
+      singleTx.recentBlockhash = "11111111111111111111111111111111";
+      [...delegatePrefixIxs, ...delegateInstructions].forEach((ix) => singleTx.add(ix));
+      singleTx.serialize({ requireAllSignatures: false, verifySignatures: false });
+      delegateBatches = [delegateInstructions];
+    } catch {
+      delegateBatches = this.chunkInstructions(
+        delegateInstructions,
+        payer,
+        delegatePrefixIxs,
+      );
+    }
     console.log(`[SESSION] Delegation requires ${delegateBatches.length} transaction(s) after burner funding`);
 
+    reportProgress?.(
+      delegateBatches.length === 1
+        ? "Signing with wallet: delegating all session accounts"
+        : `Signing with wallet: delegating session accounts in ${delegateBatches.length} transactions`,
+    );
     for (let batchIndex = 0; batchIndex < delegateBatches.length; batchIndex++) {
+      if (delegateBatches.length > 1) {
+        reportProgress?.(`Signing with wallet: delegating session batch ${batchIndex + 1} of ${delegateBatches.length}`);
+      }
       const delegateTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
         ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
         ...delegateBatches[batchIndex],
       );
@@ -1190,11 +1324,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
     this.erSigner      = burner;
     this.sessionActive = true;
-    try {
-      sessionStorage.setItem("_er_burner", JSON.stringify(Array.from(burner.secretKey)));
-    } catch (e) {
-      console.warn("[SESSION] Could not persist burner (non-fatal):", e);
-    }
+    this.persistBurner(burner);
     console.log("[SESSION] ✓ Session active");
   }
 
@@ -1229,15 +1359,15 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
           componentPda: componentProgramId,
         });
 
-      const undelegateGroups = delegatedTargets.map((target) => ([
+      const undelegateInstructions = delegatedTargets.flatMap((target) => ([
         buildUndelegateIx(PROGRAM_IDS.componentPlanet, target.planetPda),
         buildUndelegateIx(PROGRAM_IDS.componentResources, target.resourcesPda),
         buildUndelegateIx(PROGRAM_IDS.componentFleet, target.fleetPda),
         buildUndelegateIx(PROGRAM_IDS.componentResearch, target.researchPda),
       ]));
 
-      const undelegateBatches = delegatedTargets.length > 0
-        ? this.chunkInstructionGroups(undelegateGroups, undelegatePayer)
+      const undelegateBatches = undelegateInstructions.length > 0
+        ? this.chunkInstructions(undelegateInstructions, undelegatePayer)
         : [];
       console.log(`[END_SESSION] Undelegation requires ${undelegateBatches.length} transaction(s) before burner refund`);
 
@@ -1308,7 +1438,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
       this.erSigner = null;
       this.sessionActive = false;
-      try { sessionStorage.removeItem("_er_burner"); } catch {}
+      this.clearStoredBurner();
       console.log("[END_SESSION] Session ended - all state saved on Solana devnet");
       return;
     }
@@ -1408,7 +1538,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
     this.erSigner      = null;
     this.sessionActive = false;
-    try { sessionStorage.removeItem("_er_burner"); } catch {}
+    this.clearStoredBurner();
     console.log("[END_SESSION] ✓ Session ended — all state saved on Solana devnet");
   }
 
@@ -1426,6 +1556,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       ],
       data: ixDiscriminator("init_wallet_meta"),
     });
+    this.logPersistenceIntent("init_wallet_meta", "base", "Wallet registry metadata is being created on devnet.");
     await this.provider.sendAndConfirm(new Transaction().add(ix), []);
     return walletMetaPda;
   }
@@ -1463,6 +1594,11 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       data: args,
     });
 
+    this.logPersistenceIntent(
+      "register_planet",
+      "base",
+      `Planet registry write for ${galaxy}:${system}:${position}.`,
+    );
     const sig = await this.provider.sendAndConfirm(new Transaction().add(ix), []);
     console.log("[REGISTRY] ✓ Registered planet index", planetCount, ":", sig);
     return sig;
@@ -1496,8 +1632,13 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     return deserializeCoordinateRegistry(Buffer.from(account.data));
   }
 
-  private async delegateEntityComponents(entityPda: PublicKey, componentProgramIds: PublicKey[]): Promise<void> {
+  private async delegateEntityComponents(entityPda: PublicKey, componentProgramIds: PublicKey[]): Promise<string> {
     const payer = this.provider.wallet.publicKey;
+    this.logPersistenceIntent(
+      "delegate_entity_components",
+      "base",
+      `Delegating ${componentProgramIds.length} component accounts for ${entityPda.toBase58()} with auto-commit every ${ER_AUTO_COMMIT_FREQUENCY_MS}ms.`,
+    );
     const delegateTx = new Transaction().add(
       ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
@@ -1510,11 +1651,161 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
         account: componentPda,
         ownerProgram: componentProgramId,
         payer,
-      }));
+      }, ER_AUTO_COMMIT_FREQUENCY_MS));
     }
 
-    await this.provider.sendAndConfirm(delegateTx, []);
+    const sig = await this.provider.sendAndConfirm(delegateTx, []);
+    console.log("[DELEGATE] Planet delegated:", entityPda.toBase58(), sig);
+    return sig;
   }
+
+  async delegatePlanet(entityPda: PublicKey, reportProgress?: ProgressReporter): Promise<string> {
+    const componentProgramIds = [
+      PROGRAM_IDS.componentPlanet,
+      PROGRAM_IDS.componentResources,
+      PROGRAM_IDS.componentFleet,
+      PROGRAM_IDS.componentResearch,
+    ];
+    await this.ensureSessionBurner(reportProgress);
+    reportProgress?.("Signing with wallet: delegating selected planet to ER");
+    const sig = await this.delegateEntityComponents(entityPda, componentProgramIds);
+    this.sessionActive = true;
+    return sig;
+  }
+
+  async undelegatePlanet(entityPda: PublicKey): Promise<string> {
+    const payer = this.provider.wallet.publicKey;
+    const planetPda = deriveComponentPda(entityPda, PROGRAM_IDS.componentPlanet);
+    const resourcesPda = deriveComponentPda(entityPda, PROGRAM_IDS.componentResources);
+    const fleetPda = deriveComponentPda(entityPda, PROGRAM_IDS.componentFleet);
+    const researchPda = deriveComponentPda(entityPda, PROGRAM_IDS.componentResearch);
+    const researchAcc = await this.connection.getAccountInfo(researchPda, "confirmed");
+
+    const undelegatePayer = this.erSigner?.publicKey || payer;
+    const erSigner = this.erSigner;
+    const erConn = this.erDirectConnection;
+
+    const buildUndelegateIx = (componentProgramId: PublicKey, delegatedAccount: PublicKey) =>
+      createUndelegateInstruction({
+        payer: undelegatePayer,
+        delegatedAccount,
+        componentPda: componentProgramId,
+      });
+
+    const tx = new Transaction().add(
+      buildUndelegateIx(PROGRAM_IDS.componentPlanet, planetPda),
+      buildUndelegateIx(PROGRAM_IDS.componentResources, resourcesPda),
+      buildUndelegateIx(PROGRAM_IDS.componentFleet, fleetPda),
+    );
+    if (researchAcc) {
+      tx.add(buildUndelegateIx(PROGRAM_IDS.componentResearch, researchPda));
+    }
+
+    const { blockhash, lastValidBlockHeight } = await erConn.getLatestBlockhash("confirmed");
+    tx.feePayer = undelegatePayer;
+    tx.recentBlockhash = blockhash;
+
+    if (erSigner) {
+      tx.sign(erSigner);
+      const sig = await erConn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+      await erConn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+      console.log("[UNDELEGATE] Planet undelegated with burner:", entityPda.toBase58(), sig);
+      return sig;
+    }
+
+    const signedTx = await this.provider.wallet.signTransaction(tx);
+    const sig = await erConn.sendRawTransaction(signedTx.serialize(), { skipPreflight: true });
+    await erConn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+    console.log("[UNDELEGATE] Planet undelegated with wallet:", entityPda.toBase58(), sig);
+    return sig;
+  }
+
+  private getSessionAuthority(): PublicKey {
+    return this.erSigner?.publicKey ?? this.provider.wallet.publicKey;
+  }
+
+private buildCommitInstruction(primaryPlanetPda: PublicKey): TransactionInstruction {
+  const payer = this.getSessionAuthority();
+  const GAME_STATE_PROGRAM_ID = new PublicKey("7yKyjQ7m8tSqvqYnV65aVV9Jwdee7KqyELeDXf6Fxkt4");
+  const discriminator = Buffer.from([230, 31, 100, 83, 140, 6, 40, 154]);
+
+  const keys: AccountMeta[] = [
+    { pubkey: payer,                          isSigner: true,  isWritable: true  },
+    { pubkey: primaryPlanetPda,               isSigner: false, isWritable: true  },
+    { pubkey: SystemProgram.programId,        isSigner: false, isWritable: false }, // None sentinel
+    { pubkey: MAGIC_PROGRAM_ID,               isSigner: false, isWritable: false },
+    { pubkey: MAGIC_CONTEXT_ID,               isSigner: false, isWritable: true  },
+  ];
+
+  return new TransactionInstruction({
+    programId: GAME_STATE_PROGRAM_ID,
+    keys,
+    data: discriminator,
+  });
+}
+
+  private async sendErTransaction(label: string, instructions: TransactionInstruction[]): Promise<string> {
+    const erConn = this.erDirectConnection;
+    const erSigner = this.erSigner;
+    const { blockhash, lastValidBlockHeight } = await erConn.getLatestBlockhash("confirmed");
+    const tx = new Transaction().add(...instructions);
+    tx.recentBlockhash = blockhash;
+
+    const ensureErSuccess = async (signature: string): Promise<void> => {
+      const txDetails = await erConn.getTransaction(signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+      const err = txDetails?.meta?.err;
+      if (!err) return;
+
+      console.error(`[SYS:${label}] ER transaction failed after confirmation:`, err);
+      if (txDetails?.meta?.logMessages?.length) {
+        console.error(`[SYS:${label}] ER failure logs:`, txDetails.meta.logMessages);
+      }
+      throw new Error(`[SYS:${label}] ER transaction failed: ${JSON.stringify(err)}`);
+    };
+
+    if (erSigner) {
+      tx.feePayer = erSigner.publicKey;
+      tx.sign(erSigner);
+      const sig = await erConn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+      await erConn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+      await ensureErSuccess(sig);
+      console.log(`[SYS:${label}] ER transaction signed by burner:`, sig);
+      return sig;
+    }
+
+    tx.feePayer = this.provider.wallet.publicKey;
+    const signedTx = await this.provider.wallet.signTransaction(tx);
+    const sig = await erConn.sendRawTransaction(signedTx.serialize(), { skipPreflight: true });
+    await erConn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+    await ensureErSuccess(sig);
+    console.log(`[SYS:${label}] ER transaction signed by wallet:`, sig);
+    return sig;
+  }
+
+private async commitSelected(
+  entityPda: PublicKey,
+  _componentMask: number,  // no longer used, game_state commits whole PlanetState
+  label: string,
+): Promise<string | null> {
+  if (!this.sessionActive) return null;
+
+  const primaryPlanetPda = deriveComponentPda(entityPda, PROGRAM_IDS.componentPlanet);
+  const commitIx = this.buildCommitInstruction(primaryPlanetPda);
+
+  const sig = await this.sendErTransaction(
+    `commit_${label}`,
+    [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+      commitIx,
+    ],
+  );
+  console.log(`[PERSISTENCE:${label}] commit confirmed:`, sig);
+  return sig;
+}
 
   private async logResolveTransportDebug(
     sourceEntityPda: PublicKey,
@@ -1586,6 +1877,157 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     }
   }
 
+  private logPersistenceIntent(label: string, target: "er" | "base", reason: string): void {
+    if (target === "er") {
+      console.log(`[PERSISTENCE:${label}] ER execution only — not committed to devnet/base layer yet. ${reason}`);
+      return;
+    }
+    console.log(`[PERSISTENCE:${label}] Base-layer write — this is being saved to devnet/base chain. ${reason}`);
+  }
+
+  private async logScheduledCommit(label: string, erSignature: string): Promise<void> {
+    console.log(
+      `[PERSISTENCE:${label}] Polling for scheduled commit logs on ER tx ${erSignature} ` +
+      `(${COMMIT_SIGNATURE_POLL_ATTEMPTS} attempts, ${COMMIT_SIGNATURE_POLL_DELAY_MS}ms apart).`,
+    );
+
+    for (let attempt = 1; attempt <= COMMIT_SIGNATURE_POLL_ATTEMPTS; attempt++) {
+      try {
+        const commitSignature = await GetCommitmentSignature(erSignature, this.erDirectConnection);
+        console.log(
+          `[PERSISTENCE:${label}] Auto-commit observed on attempt ${attempt}/${COMMIT_SIGNATURE_POLL_ATTEMPTS}. ` +
+          `ER tx ${erSignature} scheduled a base-layer commit: ${commitSignature}`,
+        );
+        return;
+      } catch (e: any) {
+        const message = e?.message ?? String(e);
+        const isLastAttempt = attempt === COMMIT_SIGNATURE_POLL_ATTEMPTS;
+
+        if (isLastAttempt) {
+          console.log(
+            `[PERSISTENCE:${label}] No scheduled commit signature was observed after ` +
+            `${COMMIT_SIGNATURE_POLL_ATTEMPTS} polling attempts for ER tx ${erSignature}. ` +
+            `This means the client could not confirm auto-commit from logs.`,
+            message,
+          );
+          return;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, COMMIT_SIGNATURE_POLL_DELAY_MS));
+      }
+    }
+  }
+
+  private getCommitComponentTargets(entityPda: PublicKey, componentMask: number): Array<{
+    label: string;
+    pubkey: PublicKey;
+  }> {
+    const targets: Array<{ label: string; pubkey: PublicKey }> = [];
+    if (componentMask & COMMIT_PLANET) {
+      targets.push({
+        label: "planet",
+        pubkey: deriveComponentPda(entityPda, PROGRAM_IDS.componentPlanet),
+      });
+    }
+    if (componentMask & COMMIT_RESOURCES) {
+      targets.push({
+        label: "resources",
+        pubkey: deriveComponentPda(entityPda, PROGRAM_IDS.componentResources),
+      });
+    }
+    if (componentMask & COMMIT_FLEET) {
+      targets.push({
+        label: "fleet",
+        pubkey: deriveComponentPda(entityPda, PROGRAM_IDS.componentFleet),
+      });
+    }
+    if (componentMask & COMMIT_RESEARCH) {
+      targets.push({
+        label: "research",
+        pubkey: deriveComponentPda(entityPda, PROGRAM_IDS.componentResearch),
+      });
+    }
+    return targets;
+  }
+
+  private summarizeAccountComparison(
+    label: string,
+    erAccount: Awaited<ReturnType<Connection["getAccountInfo"]>>,
+    devnetAccount: Awaited<ReturnType<Connection["getAccountInfo"]>>,
+  ): string {
+    if (!erAccount && !devnetAccount) {
+      return `${label}: missing on ER and devnet`;
+    }
+    if (!erAccount) {
+      return `${label}: missing on ER, devnet owner=${devnetAccount?.owner.toBase58()} dataLen=${devnetAccount?.data.length}`;
+    }
+    if (!devnetAccount) {
+      return `${label}: ER owner=${erAccount.owner.toBase58()} dataLen=${erAccount.data.length}, missing on devnet`;
+    }
+
+    const sameOwner = erAccount.owner.equals(devnetAccount.owner);
+    const sameLength = erAccount.data.length === devnetAccount.data.length;
+    const sameData = Buffer.from(erAccount.data).equals(Buffer.from(devnetAccount.data));
+    return (
+      `${label}: erOwner=${erAccount.owner.toBase58()} devnetOwner=${devnetAccount.owner.toBase58()} ` +
+      `erLen=${erAccount.data.length} devnetLen=${devnetAccount.data.length} ` +
+      `sameOwner=${sameOwner} sameLen=${sameLength} sameData=${sameData}`
+    );
+  }
+
+  private async logCommitStateComparison(entityPda: PublicKey, componentMask: number, label: string): Promise<void> {
+    const targets = this.getCommitComponentTargets(entityPda, componentMask);
+    if (targets.length === 0) return;
+
+    console.log(
+      `[PERSISTENCE:${label}] Comparing ER vs devnet state for ${targets.length} committed component(s) ` +
+      `on entity ${entityPda.toBase58()}.`,
+    );
+
+    for (let attempt = 1; attempt <= COMMIT_STATE_COMPARE_ATTEMPTS; attempt++) {
+      const erAccounts = await this.erDirectConnection.getMultipleAccountsInfo(
+        targets.map((target) => target.pubkey),
+        "confirmed",
+      );
+      const devnetAccounts = await this.connection.getMultipleAccountsInfo(
+        targets.map((target) => target.pubkey),
+        "confirmed",
+      );
+
+      const comparisons = targets.map((target, index) =>
+        this.summarizeAccountComparison(target.label, erAccounts[index], devnetAccounts[index]),
+      );
+      const allMatched = targets.every((_, index) => {
+        const erAccount = erAccounts[index];
+        const devnetAccount = devnetAccounts[index];
+        return !!erAccount &&
+          !!devnetAccount &&
+          erAccount.owner.equals(devnetAccount.owner) &&
+          Buffer.from(erAccount.data).equals(Buffer.from(devnetAccount.data));
+      });
+
+      console.log(
+        `[PERSISTENCE:${label}] ER vs devnet comparison attempt ${attempt}/${COMMIT_STATE_COMPARE_ATTEMPTS}:`,
+        comparisons,
+      );
+
+      if (allMatched) {
+        console.log(
+          `[PERSISTENCE:${label}] ER and devnet now match for all selected committed components.`,
+        );
+        return;
+      }
+
+      if (attempt < COMMIT_STATE_COMPARE_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, COMMIT_STATE_COMPARE_DELAY_MS));
+      }
+    }
+
+    console.log(
+      `[PERSISTENCE:${label}] ER and devnet still differ after ${COMMIT_STATE_COMPARE_ATTEMPTS} comparison attempts.`,
+    );
+  }
+
   private logInstructionKeys(label: string, ix: TransactionInstruction): void {
     console.log(`[SYS:${label}] ApplySystem instruction keys:`);
     ix.keys.forEach((key, index) => {
@@ -1608,7 +2050,12 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
     try {
       let sig: string;
-      if (this.sessionActive && this.erSigner) {
+      if (this.sessionActive) {
+        this.logPersistenceIntent(
+          label,
+          "er",
+          "Delegated gameplay is executing on ER. This updates ER state but does not by itself commit to devnet/base layer.",
+        );
         const erConn = this.erDirectConnection;
         const erSigner = this.erSigner;
 
@@ -1630,11 +2077,19 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
             patchedIx,
           );
           tx.recentBlockhash = blockhash;
-          tx.feePayer = erSigner.publicKey;
-          tx.sign(erSigner);
-          const txSig = await erConn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-          await erConn.confirmTransaction({ signature: txSig, blockhash, lastValidBlockHeight }, "confirmed");
-          return txSig;
+          if (erSigner) {
+            tx.feePayer = erSigner.publicKey;
+            tx.sign(erSigner);
+            const txSig = await erConn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+            await erConn.confirmTransaction({ signature: txSig, blockhash, lastValidBlockHeight }, "confirmed");
+            return txSig;
+          } else {
+            tx.feePayer = this.provider.wallet.publicKey;
+            const signedTx = await this.provider.wallet.signTransaction(tx);
+            const txSig = await erConn.sendRawTransaction(signedTx.serialize(), { skipPreflight: true });
+            await erConn.confirmTransaction({ signature: txSig, blockhash, lastValidBlockHeight }, "confirmed");
+            return txSig;
+          }
         };
 
         let erSig: string | undefined;
@@ -1651,6 +2106,11 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
         if (!erSig) throw new Error(`[SYS:${label}] Failed after retries`);
         sig = erSig;
       } else {
+        this.logPersistenceIntent(
+          label,
+          "base",
+          "No active delegated signer path was used, so this ApplySystem is being sent through the wallet/base-layer route.",
+        );
         const { transaction: applyTx } = await ApplySystem({
           authority,
           systemId,
@@ -1673,7 +2133,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       await this.logSendTransactionError(
         label,
         err,
-        this.sessionActive && this.erSigner ? this.erDirectConnection : this.connection,
+        this.sessionActive ? this.erDirectConnection : this.connection,
       );
       throw err;
     }
@@ -1694,7 +2154,12 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
     try {
       let sig: string;
-      if (this.sessionActive && this.erSigner) {
+      if (this.sessionActive) {
+        this.logPersistenceIntent(
+          label,
+          "er",
+          "Delegated gameplay is executing on ER. This updates ER state but does not by itself commit to devnet/base layer.",
+        );
         const erConn    = this.erDirectConnection;
         const erSigner  = this.erSigner;
 
@@ -1715,11 +2180,19 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
             patchedIx,
           );
           tx.recentBlockhash = blockhash;
-          tx.feePayer        = erSigner.publicKey;
-          tx.sign(erSigner);
-          const txSig = await erConn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-          await erConn.confirmTransaction({ signature: txSig, blockhash, lastValidBlockHeight }, "confirmed");
-          return txSig;
+          if (erSigner) {
+            tx.feePayer = erSigner.publicKey;
+            tx.sign(erSigner);
+            const txSig = await erConn.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+            await erConn.confirmTransaction({ signature: txSig, blockhash, lastValidBlockHeight }, "confirmed");
+            return txSig;
+          } else {
+            tx.feePayer = this.provider.wallet.publicKey;
+            const signedTx = await this.provider.wallet.signTransaction(tx);
+            const txSig = await erConn.sendRawTransaction(signedTx.serialize(), { skipPreflight: true });
+            await erConn.confirmTransaction({ signature: txSig, blockhash, lastValidBlockHeight }, "confirmed");
+            return txSig;
+          }
         };
 
         let erSig: string | undefined;
@@ -1738,6 +2211,11 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
         if (!erSig) throw new Error(`[SYS:${label}] Failed after ${maxRetries} attempts`);
         sig = erSig;
       } else {
+        this.logPersistenceIntent(
+          label,
+          "base",
+          "No active delegated signer path was used, so this ApplySystem is being sent through the wallet/base-layer route.",
+        );
         const { transaction: applyTx } = await ApplySystem({
           authority,
           systemId,
@@ -1758,7 +2236,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       await this.logSendTransactionError(
         label,
         err,
-        this.sessionActive && this.erSigner ? this.erDirectConnection : this.connection,
+        this.sessionActive ? this.erDirectConnection : this.connection,
       );
       throw err;
     }
