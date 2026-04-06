@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
-import { Planet } from "./game";
+import { Planet } from "./game-state";
 
 interface GalaxyMapProps {
   currentPlanet: Planet;                    // Used only for "my home system" button / fallback

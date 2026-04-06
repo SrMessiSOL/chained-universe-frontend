@@ -576,18 +576,27 @@ const ConfirmationModal: React.FC<{
 const CARGO_SHIP_KEYS = ["smallCargo","largeCargo","recycler","espionageProbe","colonyShip"];
 
 const LaunchModal: React.FC<{
-  fleet: Fleet; res: Resources; ownedPlanets: PlayerState[]; currentPlanetPda: string;
-  onClose: () => void; txBusy: boolean;
-  onLaunch: (ships: Record<string,number>, cargo: { metal:bigint; crystal:bigint; deuterium:bigint }, missionType:number, flightSecs:number, speedFactor:number, target:LaunchTargetInput) => Promise<void>;
+  fleet: Fleet;
+  res: Resources;
+  ownedPlanets: PlayerState[];
+  currentPlanetPda: string;
+  onClose: () => void;
+  txBusy: boolean;
+  onLaunch: (
+    ships: Record<string, number>,
+    cargo: { metal: bigint; crystal: bigint; deuterium: bigint },
+    missionType: number,
+    speedFactor: number,
+    target: LaunchTargetInput
+  ) => Promise<void>;
 }> = ({ fleet, res, ownedPlanets, currentPlanetPda, onClose, onLaunch, txBusy }) => {
-  const [shipQty, setShipQty] = useState<Record<string,number>>({});
+  const [shipQty, setShipQty] = useState<Record<string, number>>({});
   const [missionType, setMissionType] = useState(2);
   const [cargoM, setCargoM] = useState(0);
   const [cargoC, setCargoC] = useState(0);
   const [cargoD, setCargoD] = useState(0);
-  const [flightH, setFlightH] = useState(1);
   const [speed, setSpeed] = useState(100);
-  const [transportMode, setTransportMode] = useState<"owned"|"coords">("owned");
+  const [transportMode, setTransportMode] = useState<"owned" | "coords">("owned");
   const selectableOwned = ownedPlanets.filter(p => p.planetPda !== currentPlanetPda);
   const [targetEntity, setTargetEntity] = useState(selectableOwned[0]?.entityPda ?? "");
   const [targetGalaxy, setTargetGalaxy] = useState(1);
@@ -595,114 +604,331 @@ const LaunchModal: React.FC<{
   const [targetPosition, setTargetPosition] = useState(1);
   const [colonyName, setColonyName] = useState("Colony");
   const [launching, setLaunching] = useState(false);
-  const [localErr, setLocalErr] = useState<string|null>(null);
+  const [localErr, setLocalErr] = useState<string | null>(null);
 
   const getQty = (key: string) => shipQty[key] ?? 0;
-  const setQty = (key: string, v: number) => setShipQty(p => ({ ...p, [key]: Math.max(0, Math.min((fleet as any)[key] ?? 0, v)) }));
-  const totalSent = Object.values(shipQty).reduce((a,b) => a+b, 0);
-  const cargoCap = getQty("smallCargo")*5000+getQty("largeCargo")*25000+getQty("recycler")*20000+getQty("cruiser")*800+getQty("battleship")*1500;
-  const cargoUsed = cargoM+cargoC+cargoD;
 
-  const handleLaunch = async () => {
-    setLocalErr(null);
-    if (totalSent === 0) { setLocalErr("Select at least one ship."); return; }
-    if (cargoUsed > cargoCap) { setLocalErr("Cargo exceeds capacity."); return; }
-    if (missionType === 5 && getQty("colonyShip") <= 0) { setLocalErr("Colonize requires a colony ship."); return; }
-    setLaunching(true);
+  const setQty = (key: string, v: number) =>
+    setShipQty(prev => ({
+      ...prev,
+      [key]: Math.max(0, Math.min((fleet as any)[key] ?? 0, v)),
+    }));
+
+  const totalSent = Object.values(shipQty).reduce((a, b) => a + b, 0);
+  const cargoCap =
+    getQty("smallCargo") * 5000 +
+    getQty("largeCargo") * 25000 +
+    getQty("recycler") * 20000 +
+    getQty("cruiser") * 800 +
+    getQty("battleship") * 1500;
+
+  const cargoUsed = cargoM + cargoC + cargoD;
+
+  const handleSubmit = async () => {
     try {
-      const target: LaunchTargetInput = missionType === 2
-        ? (transportMode === "owned"
-            ? { kind:"transport", mode:"owned", destinationEntity:targetEntity.trim() }
-            : { kind:"transport", mode:"coords", galaxy:targetGalaxy, system:targetSystem, position:targetPosition })
-        : { kind:"colonize", galaxy:targetGalaxy, system:targetSystem, position:targetPosition, colonyName:colonyName.trim()||"Colony" };
-      await onLaunch(shipQty, { metal:BigInt(cargoM), crystal:BigInt(cargoC), deuterium:BigInt(cargoD) }, missionType, flightH*3600, speed, target);
+      setLocalErr(null);
+
+      if (totalSent <= 0) {
+        throw new Error("Select at least one ship.");
+      }
+
+      if (cargoUsed > cargoCap) {
+        throw new Error("Cargo exceeds fleet capacity.");
+      }
+
+      if (fleet.activeMissions >= 4) {
+        throw new Error("No mission slots available.");
+      }
+
+      if (missionType === 5 && getQty("colonyShip") <= 0) {
+        throw new Error("Colonize requires at least 1 colony ship.");
+      }
+
+      let target: LaunchTargetInput;
+
+      if (missionType === 2) {
+        if (transportMode === "owned") {
+          if (!targetEntity) throw new Error("Select a destination planet.");
+          target = {
+            kind: "transport",
+            mode: "owned",
+            destinationEntity: targetEntity,
+          };
+        } else {
+          target = {
+            kind: "transport",
+            mode: "coords",
+            galaxy: targetGalaxy,
+            system: targetSystem,
+            position: targetPosition,
+          };
+        }
+      } else {
+        target = {
+          kind: "colonize",
+          galaxy: targetGalaxy,
+          system: targetSystem,
+          position: targetPosition,
+          colonyName: colonyName.trim() || "Colony",
+        };
+      }
+
+      setLaunching(true);
+
+      await onLaunch(
+        shipQty,
+        {
+          metal: BigInt(cargoM),
+          crystal: BigInt(cargoC),
+          deuterium: BigInt(cargoD),
+        },
+        missionType,
+        speed,
+        target
+      );
+
       onClose();
-    } catch (e: any) { setLocalErr(e?.message ?? "Launch failed"); }
-    finally { setLaunching(false); }
+    } catch (e: any) {
+      setLocalErr(e?.message || String(e));
+    } finally {
+      setLaunching(false);
+    }
   };
 
   return (
     <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="modal">
         <div className="modal-title">⊹ LAUNCH FLEET</div>
+
         <div className="modal-section">
           <div className="modal-label">Mission Type</div>
-          <select className="modal-select" value={missionType} onChange={e => setMissionType(Number(e.target.value))}>
+          <select
+            className="modal-select"
+            value={missionType}
+            onChange={e => setMissionType(Number(e.target.value))}
+          >
             <option value={2}>TRANSPORT</option>
             <option value={5}>COLONIZE</option>
           </select>
         </div>
+
         {missionType === 2 && (
           <div className="modal-section">
             <div className="modal-label">Target</div>
+
             <div className="modal-row">
-              <span style={{ fontSize:11, color:"var(--dim)" }}>Mode</span>
-              <select className="modal-select" value={transportMode} onChange={e => setTransportMode(e.target.value as any)}>
+              <span style={{ fontSize: 11, color: "var(--dim)" }}>Mode</span>
+              <select
+                className="modal-select"
+                value={transportMode}
+                onChange={e => setTransportMode(e.target.value as "owned" | "coords")}
+              >
                 <option value="owned">My planets</option>
                 <option value="coords">Coordinates</option>
               </select>
             </div>
+
             {transportMode === "owned" ? (
               <div className="modal-row">
-                <span style={{ fontSize:11, color:"var(--dim)" }}>Destination</span>
-                <select className="modal-select" value={targetEntity} onChange={e => setTargetEntity(e.target.value)} disabled={selectableOwned.length === 0}>
-                  {selectableOwned.length === 0 ? <option value="">No other planets</option>
-                    : selectableOwned.map(p => <option key={p.entityPda} value={p.entityPda}>{p.planet.name} [{p.planet.galaxy}:{p.planet.system}:{p.planet.position}]</option>)}
+                <span style={{ fontSize: 11, color: "var(--dim)" }}>Destination</span>
+                <select
+                  className="modal-select"
+                  value={targetEntity}
+                  onChange={e => setTargetEntity(e.target.value)}
+                  disabled={selectableOwned.length === 0}
+                >
+                  {selectableOwned.length === 0 ? (
+                    <option value="">No other planets</option>
+                  ) : (
+                    selectableOwned.map(p => (
+                      <option key={p.entityPda} value={p.entityPda}>
+                        {p.planet.name} [{p.planet.galaxy}:{p.planet.system}:{p.planet.position}]
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
             ) : (
               <>
-                <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Galaxy</span><input className="modal-input" type="number" min={1} max={9} value={targetGalaxy} onChange={e => setTargetGalaxy(Math.max(1,Math.min(9,parseInt(e.target.value)||1)))} /></div>
-                <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>System</span><input className="modal-input" type="number" min={1} max={499} value={targetSystem} onChange={e => setTargetSystem(Math.max(1,Math.min(499,parseInt(e.target.value)||1)))} /></div>
-                <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Position</span><input className="modal-input" type="number" min={1} max={15} value={targetPosition} onChange={e => setTargetPosition(Math.max(1,Math.min(15,parseInt(e.target.value)||1)))} /></div>
+                <div className="modal-row">
+                  <span style={{ fontSize: 11, color: "var(--dim)" }}>Galaxy</span>
+                  <input
+                    className="modal-input"
+                    type="number"
+                    min={1}
+                    max={9}
+                    value={targetGalaxy}
+                    onChange={e => setTargetGalaxy(Math.max(1, Math.min(9, parseInt(e.target.value) || 1)))}
+                  />
+                </div>
+                <div className="modal-row">
+                  <span style={{ fontSize: 11, color: "var(--dim)" }}>System</span>
+                  <input
+                    className="modal-input"
+                    type="number"
+                    min={1}
+                    max={499}
+                    value={targetSystem}
+                    onChange={e => setTargetSystem(Math.max(1, Math.min(499, parseInt(e.target.value) || 1)))}
+                  />
+                </div>
+                <div className="modal-row">
+                  <span style={{ fontSize: 11, color: "var(--dim)" }}>Position</span>
+                  <input
+                    className="modal-input"
+                    type="number"
+                    min={1}
+                    max={15}
+                    value={targetPosition}
+                    onChange={e => setTargetPosition(Math.max(1, Math.min(15, parseInt(e.target.value) || 1)))}
+                  />
+                </div>
               </>
             )}
           </div>
         )}
+
         {missionType === 5 && (
           <div className="modal-section">
             <div className="modal-label">Colony Target</div>
-            <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Galaxy</span><input className="modal-input" type="number" min={1} max={9} value={targetGalaxy} onChange={e => setTargetGalaxy(Math.max(1,Math.min(9,parseInt(e.target.value)||1)))} /></div>
-            <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>System</span><input className="modal-input" type="number" min={1} max={499} value={targetSystem} onChange={e => setTargetSystem(Math.max(1,Math.min(499,parseInt(e.target.value)||1)))} /></div>
-            <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Position</span><input className="modal-input" type="number" min={1} max={15} value={targetPosition} onChange={e => setTargetPosition(Math.max(1,Math.min(15,parseInt(e.target.value)||1)))} /></div>
-            <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Colony Name</span><input className="modal-input" type="text" maxLength={32} value={colonyName} onChange={e => setColonyName(e.target.value)} /></div>
+
+            <div className="modal-row">
+              <span style={{ fontSize: 11, color: "var(--dim)" }}>Galaxy</span>
+              <input
+                className="modal-input"
+                type="number"
+                min={1}
+                max={9}
+                value={targetGalaxy}
+                onChange={e => setTargetGalaxy(Math.max(1, Math.min(9, parseInt(e.target.value) || 1)))}
+              />
+            </div>
+
+            <div className="modal-row">
+              <span style={{ fontSize: 11, color: "var(--dim)" }}>System</span>
+              <input
+                className="modal-input"
+                type="number"
+                min={1}
+                max={499}
+                value={targetSystem}
+                onChange={e => setTargetSystem(Math.max(1, Math.min(499, parseInt(e.target.value) || 1)))}
+              />
+            </div>
+
+            <div className="modal-row">
+              <span style={{ fontSize: 11, color: "var(--dim)" }}>Position</span>
+              <input
+                className="modal-input"
+                type="number"
+                min={1}
+                max={15}
+                value={targetPosition}
+                onChange={e => setTargetPosition(Math.max(1, Math.min(15, parseInt(e.target.value) || 1)))}
+              />
+            </div>
+
+            <div className="modal-row">
+              <span style={{ fontSize: 11, color: "var(--dim)" }}>Colony Name</span>
+              <input
+                className="modal-input"
+                type="text"
+                maxLength={32}
+                value={colonyName}
+                onChange={e => setColonyName(e.target.value)}
+              />
+            </div>
           </div>
         )}
+
         <div className="modal-section">
-          <div className="modal-label">Ships <span style={{ color:"var(--cyan)" }}>{totalSent > 0 ? `${totalSent} selected` : "none"}</span></div>
+          <div className="modal-label">
+            Ships <span style={{ color: "var(--cyan)" }}>{totalSent > 0 ? `${totalSent} selected` : "none"}</span>
+          </div>
+
           <div className="modal-ship-grid">
             {SHIPS.map(ship => {
-              const avail = (fleet as any)[ship.key] as number ?? 0;
+              const avail = ((fleet as any)[ship.key] as number) ?? 0;
               if (avail === 0) return null;
+
               return (
                 <div key={ship.key} className="modal-ship-row">
-                  <div><div className="modal-ship-label">{ship.icon} {ship.name}</div><div className="modal-ship-avail">Avail: {avail.toLocaleString()}</div></div>
-                  <input className="modal-input" type="number" min={0} max={avail} value={getQty(ship.key)||""} placeholder="0" onChange={e => setQty(ship.key, parseInt(e.target.value)||0)} />
+                  <div>
+                    <div className="modal-ship-label">{ship.icon} {ship.name}</div>
+                    <div className="modal-ship-avail">Avail: {avail.toLocaleString()}</div>
+                  </div>
+                  <input
+                    className="modal-input"
+                    type="number"
+                    min={0}
+                    max={avail}
+                    value={getQty(ship.key) || ""}
+                    placeholder="0"
+                    onChange={e => setQty(ship.key, parseInt(e.target.value) || 0)}
+                  />
                 </div>
               );
             })}
           </div>
         </div>
+
         {cargoCap > 0 && (
           <div className="modal-section">
-            <div className="modal-label">Cargo <span style={{ color:cargoUsed>cargoCap?"var(--danger)":"var(--dim)" }}>{cargoUsed.toLocaleString()} / {cargoCap.toLocaleString()}</span></div>
-            {[{label:"Metal",color:"var(--metal)",val:cargoM,max:Number(res.metal),set:setCargoM},{label:"Crystal",color:"var(--crystal)",val:cargoC,max:Number(res.crystal),set:setCargoC},{label:"Deuterium",color:"var(--deut)",val:cargoD,max:Number(res.deuterium),set:setCargoD}].map(r => (
+            <div className="modal-label">
+              Cargo{" "}
+              <span style={{ color: cargoUsed > cargoCap ? "var(--danger)" : "var(--dim)" }}>
+                {cargoUsed.toLocaleString()} / {cargoCap.toLocaleString()}
+              </span>
+            </div>
+
+            {[
+              { label: "Metal", color: "var(--metal)", val: cargoM, max: Number(res.metal), set: setCargoM },
+              { label: "Crystal", color: "var(--crystal)", val: cargoC, max: Number(res.crystal), set: setCargoC },
+              { label: "Deuterium", color: "var(--deut)", val: cargoD, max: Number(res.deuterium), set: setCargoD },
+            ].map(r => (
               <div key={r.label} className="modal-row">
-                <span style={{ color:r.color, fontSize:11 }}>{r.label} (avail: {fmt(r.max)})</span>
-                <input className="modal-input" type="number" min={0} max={r.max} value={r.val||""} placeholder="0" onChange={e => r.set(Math.max(0,Math.min(r.max,parseInt(e.target.value)||0)))} />
+                <span style={{ color: r.color, fontSize: 11 }}>{r.label} (avail: {fmt(r.max)})</span>
+                <input
+                  className="modal-input"
+                  type="number"
+                  min={0}
+                  max={r.max}
+                  value={r.val || ""}
+                  placeholder="0"
+                  onChange={e => r.set(Math.max(0, Math.min(r.max, parseInt(e.target.value) || 0)))}
+                />
               </div>
             ))}
           </div>
         )}
+
         <div className="modal-section">
           <div className="modal-label">Flight Parameters</div>
-          <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Duration (hours)</span><input className="modal-input" type="number" min={1} max={240} value={flightH} onChange={e => setFlightH(Math.max(1,parseInt(e.target.value)||1))} /></div>
-          <div className="modal-row"><span style={{ fontSize:11, color:"var(--dim)" }}>Speed (10–100%)</span><input className="modal-input" type="number" min={10} max={100} step={10} value={speed} onChange={e => setSpeed(Math.max(10,Math.min(100,parseInt(e.target.value)||100)))} /></div>
+          <div className="modal-row">
+            <span style={{ fontSize: 11, color: "var(--dim)" }}>Speed (10–100%)</span>
+            <input
+              className="modal-input"
+              type="number"
+              min={10}
+              max={100}
+              step={10}
+              value={speed}
+              onChange={e => setSpeed(Math.max(10, Math.min(100, parseInt(e.target.value) || 100)))}
+            />
+          </div>
         </div>
-        {localErr && <div className="error-msg" style={{ marginBottom:8 }}>{localErr}</div>}
+
+        {localErr && <div className="error-msg" style={{ marginBottom: 8 }}>{localErr}</div>}
+
         <div className="modal-footer">
-          <button className="modal-btn secondary" onClick={onClose} disabled={launching||txBusy}>CANCEL</button>
-          <button className="modal-btn primary" onClick={handleLaunch} disabled={launching||txBusy||totalSent===0||fleet.activeMissions>=4}>
+          <button className="modal-btn secondary" onClick={onClose} disabled={launching || txBusy}>
+            CANCEL
+          </button>
+          <button
+            className="modal-btn primary"
+            onClick={handleSubmit}
+            disabled={launching || txBusy || totalSent === 0 || fleet.activeMissions >= 4}
+          >
             {launching ? "LAUNCHING..." : "⊹ LAUNCH"}
           </button>
         </div>
@@ -1129,32 +1355,76 @@ const [depositAmount, setDepositAmount] = useState("");
   };
 
   const handleLaunch = async (
-    ships: Record<string,number>, cargo: { metal:bigint; crystal:bigint; deuterium:bigint },
-    missionType: number, flightSecs: number, speedFactor: number, target: LaunchTargetInput,
-  ) => {
-    if (!clientRef.current || !state) return;
-    let launchTarget: { galaxy:number; system:number; position:number; colonyName?: string };
-    if (target.kind === "transport") {
-      if (target.mode === "owned") {
-        const dest = planets.find(p => p.entityPda === target.destinationEntity);
-        if (!dest) throw new Error("Destination planet not found.");
-        launchTarget = { galaxy:dest.planet.galaxy, system:dest.planet.system, position:dest.planet.position };
-      } else {
-        const sysPlanets = await clientRef.current.getSystemPlanets(target.galaxy, target.system);
-        if (!sysPlanets.find(p => p.position === target.position)) throw new Error(`No planet at ${target.galaxy}:${target.system}:${target.position}.`);
-        launchTarget = { galaxy:target.galaxy, system:target.system, position:target.position };
-      }
+  ships: Record<string, number>,
+  cargo: { metal: bigint; crystal: bigint; deuterium: bigint },
+  missionType: number,
+  speedFactor: number,
+  target: LaunchTargetInput,
+) => {
+  if (!clientRef.current || !state) return;
+
+  let launchTarget: { galaxy: number; system: number; position: number; colonyName?: string };
+
+  if (target.kind === "transport") {
+    if (target.mode === "owned") {
+      const dest = planets.find(p => p.entityPda === target.destinationEntity);
+      if (!dest) throw new Error("Destination planet not found.");
+      launchTarget = {
+        galaxy: dest.planet.galaxy,
+        system: dest.planet.system,
+        position: dest.planet.position,
+      };
     } else {
       const sysPlanets = await clientRef.current.getSystemPlanets(target.galaxy, target.system);
-      if (sysPlanets.find(p => p.position === target.position)) throw new Error(`Slot ${target.galaxy}:${target.system}:${target.position} is occupied.`);
-      launchTarget = { galaxy:target.galaxy, system:target.system, position:target.position, colonyName:target.colonyName };
+      if (!sysPlanets.find(p => p.position === target.position)) {
+        throw new Error(`No planet at ${target.galaxy}:${target.system}:${target.position}.`);
+      }
+      launchTarget = {
+        galaxy: target.galaxy,
+        system: target.system,
+        position: target.position,
+      };
     }
-    await withTx("Launch fleet", () => clientRef.current!.launchFleet(
+  } else {
+    const sysPlanets = await clientRef.current.getSystemPlanets(target.galaxy, target.system);
+    if (sysPlanets.find(p => p.position === target.position)) {
+      throw new Error(`Slot ${target.galaxy}:${target.system}:${target.position} is occupied.`);
+    }
+    launchTarget = {
+      galaxy: target.galaxy,
+      system: target.system,
+      position: target.position,
+      colonyName: target.colonyName,
+    };
+  }
+
+  await withTx("Launch fleet", () =>
+    clientRef.current!.launchFleet(
       new PublicKey(state.entityPda),
-      { lf:ships.lightFighter, hf:ships.heavyFighter, cr:ships.cruiser, bs:ships.battleship, bc:ships.battlecruiser, bm:ships.bomber, ds:ships.destroyer, de:ships.deathstar, sc:ships.smallCargo, lc:ships.largeCargo, rec:ships.recycler, ep:ships.espionageProbe, col:ships.colonyShip },
-      cargo, missionType, flightSecs, speedFactor, launchTarget,
-    ));
-  };
+      {
+        lf: ships.lightFighter,
+        hf: ships.heavyFighter,
+        cr: ships.cruiser,
+        bs: ships.battleship,
+        bc: ships.battlecruiser,
+        bm: ships.bomber,
+        ds: ships.destroyer,
+        de: ships.deathstar,
+        sc: ships.smallCargo,
+        lc: ships.largeCargo,
+        rec: ships.recycler,
+        ep: ships.espionageProbe,
+        col: ships.colonyShip,
+      },
+      cargo,
+      missionType,
+      speedFactor,
+      launchTarget,
+    )
+  );
+};
+
+  
 
   const executeResolveColonize = async (mission: Mission, slotIdx: number) => {
     if (!clientRef.current || !state) return;
@@ -1184,7 +1454,7 @@ const [depositAmount, setDepositAmount] = useState("");
         <div className="landing">
           <div className="landing-logo"><LogoSVG size={120} /></div>
           <div>
-            <div className="landing-title">CHAINED UNIVERSE</div>
+            <div className="landing-title">GAMESOL</div>
             <div className="landing-sub">On-chain space strategy · Solana</div>
           </div>
           <WalletMultiButton />
@@ -1202,7 +1472,7 @@ const [depositAmount, setDepositAmount] = useState("");
       {connected && !loading && (
         <div className="app">
           <header className="header">
-            <div className="logo-area"><LogoSVG size={28} /><span className="game-title">CHAINED UNIVERSE</span></div>
+            <div className="logo-area"><LogoSVG size={28} /><span className="game-title">GAMESOL</span></div>
             <div className="header-right">
               <span className="chain-tag">DEVNET</span>
 <button

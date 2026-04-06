@@ -101,6 +101,7 @@ export interface Mission {
   cargoCrystal: bigint;
   cargoDeuterium: bigint;
   applied: boolean;
+  speedFactor: number;
 }
 
 export interface Planet {
