@@ -13,6 +13,7 @@ import { AnchorProvider, setProvider } from "@coral-xyz/anchor";
 // ─── Constants ────────────────────────────────────────────────────────────────
 export const GAME_STATE_PROGRAM_ID = new PublicKey("7yKyjQ7m8tSqvqYnV65aVV9Jwdee7KqyELeDXf6Fxkt4");
 export const RPC_ENDPOINT = "https://api.devnet.solana.com";
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 const VAULT_MIN_BALANCE_LAMPORTS = 5_000_000;
 const VAULT_TARGET_BALANCE_LAMPORTS = 20_000_000;
@@ -22,11 +23,16 @@ const VAULT_CACHE_VERSION = 1;
 const VAULT_CACHE_STORAGE_PREFIX = "chained_universe_vault_cache_v1";
 const VAULT_CACHE_DEVICE_KEY_STORAGE = "chained_universe_vault_cache_device_key_v1";
 
+// Max attempts for homeworld random coord selection before giving up
+const HOMEWORLD_MAX_COORD_ATTEMPTS = 20;
+
 // ─── Discriminators ───────────────────────────────────────────────────────────
 const PLAYER_PROFILE_DISCRIMINATOR = Buffer.from([82, 226, 99, 87, 164, 130, 181, 80]);
 const PLANET_STATE_DISCRIMINATOR   = Buffer.from([1, 25, 230, 69, 194, 252, 152, 240]);
+const PLANET_COORDS_DISCRIMINATOR  = Buffer.from([227, 189, 46, 7, 82, 27, 239, 25]);
 const AUTHORIZED_VAULT_DISCRIMINATOR = Buffer.from([224, 162, 234, 3, 170, 103, 243, 244]);
 const VAULT_BACKUP_DISCRIMINATOR     = Buffer.from([167, 172, 2, 221, 196, 20, 199, 27]);
+const GAME_CONFIG_DISCRIMINATOR      = Buffer.from([45, 146, 146, 33, 170, 69, 96, 133]);
 
 // ─── Instruction Discriminators ───────────────────────────────────────────────
 // NOTE: These must be updated after `anchor build` generates the new IDL.
@@ -58,6 +64,9 @@ const IX = {
   buildShip:              Buffer.from([213, 16, 198, 123, 106, 214, 120, 157]),
   buildShipVault:         Buffer.from([76, 50, 77, 203, 109, 0, 245, 222]),
 
+  finishShipBuild:        Buffer.from([95, 62, 255, 233, 232, 122, 224, 23]),
+  finishShipBuildVault:   Buffer.from([191, 208, 60, 173, 69, 244, 125, 195]),
+
   launchFleet:            Buffer.from([54, 168, 21, 184, 175, 6, 32, 5]),
   launchFleetVault:       Buffer.from([11, 245, 64, 137, 202, 190, 124, 7]),
 
@@ -66,6 +75,14 @@ const IX = {
 
   resolveColonize:        Buffer.from([229, 191, 212, 205, 242, 178, 50, 79]),
   resolveColonizeVault:   Buffer.from([144, 28, 197, 235, 65, 250, 241, 88]),
+
+  // NOTE: update after anchor build
+  transferPlanet:         Buffer.from([232, 252, 120, 248, 25, 87, 134, 149]),
+  initializeGameConfig:   Buffer.from([45, 61, 80, 55, 152, 63, 158, 47]),
+  updateAntimatterMint:   Buffer.from([109, 33, 55, 58, 48, 116, 144, 219]),
+  accelerateBuildWithAntimatter: Buffer.from([214, 108, 93, 196, 157, 250, 5, 38]),
+  accelerateResearchWithAntimatter: Buffer.from([3, 138, 193, 93, 109, 41, 36, 73]),
+  accelerateShipBuildWithAntimatter: Buffer.from([144, 20, 132, 188, 15, 71, 35, 74]),
 } as const;
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
@@ -133,6 +150,9 @@ export interface Planet {
   buildQueueItem: number;
   buildQueueTarget: number;
   buildFinishTs: number;
+  shipBuildItem: number;
+  shipBuildQty: number;
+  shipBuildFinishTs: number;
 }
 
 export interface Research {
@@ -202,6 +222,11 @@ export interface VaultRecoveryPromptRequest {
   wallet: string;
 }
 
+export interface GameConfigState {
+  admin: string;
+  antimatterMint: string;
+}
+
 export type VaultRecoveryPromptHandler = (request: VaultRecoveryPromptRequest) => Promise<string>;
 
 export interface LaunchFleetTarget {
@@ -212,6 +237,13 @@ export interface LaunchFleetTarget {
 }
 
 export type ProgressReporter = (message: string) => void;
+
+export type VaultStatus =
+  | "ready"              // vault keypair loaded and funded
+  | "not_initialized"   // no player profile on-chain yet
+  | "backup_missing"    // player exists but no on-chain backup found
+  | "wrong_password"    // backup found but decryption failed
+  | "loading";          // still resolving
 
 interface GameClientOptions {
   requestVaultRecoveryPassphrase?: VaultRecoveryPromptHandler;
@@ -261,6 +293,9 @@ interface PlanetStateAccount {
   buildQueueItem: number;
   buildQueueTarget: number;
   buildFinishTs: number;
+  shipBuildItem: number;
+  shipBuildQty: number;
+  shipBuildFinishTs: number;
   metal: bigint;
   crystal: bigint;
   deuterium: bigint;
@@ -308,6 +343,12 @@ interface VaultBackupAccount {
   salt: Uint8Array;
   kdfSalt: Uint8Array;
   updatedAt: number;
+  bump: number;
+}
+
+interface GameConfigAccount {
+  admin: PublicKey;
+  antimatterMint: PublicKey;
   bump: number;
 }
 
@@ -396,7 +437,7 @@ function encodeRotateVaultArgs(
   return writer.toBuffer();
 }
 
-function encodeHomeworldArgs(now: number, name: string, galaxy = 0, system = 0, position = 0): Buffer {
+function encodeHomeworldArgs(now: number, name: string, galaxy: number, system: number, position: number): Buffer {
   const writer = new BorshWriter();
   writer.writeI64(now);
   writer.writeString(name);
@@ -441,6 +482,12 @@ function encodeBuildShipArgs(shipType: number, quantity: number, now: number): B
   return writer.toBuffer();
 }
 
+function encodePubkeyArg(value: PublicKey): Buffer {
+  const writer = new BorshWriter();
+  writer.writeFixedBytes(value.toBytes());
+  return writer.toBuffer();
+}
+
 function encodeI64Arg(value: number): Buffer {
   const writer = new BorshWriter();
   writer.writeI64(value);
@@ -453,7 +500,6 @@ function encodeLaunchFleetArgs(
   missionType: number,
   speedFactor: number,
   now: number,
-  flightSeconds: number,
   target: LaunchFleetTarget,
 ): Buffer {
   const writer = new BorshWriter();
@@ -476,7 +522,6 @@ function encodeLaunchFleetArgs(
   writer.writeU64(cargo.deuterium ?? 0n);
   writer.writeU8(speedFactor);
   writer.writeI64(now);
-  writer.writeI64(flightSeconds);
   writer.writeU16(target.galaxy);
   writer.writeU16(target.system);
   writer.writeU8(target.position);
@@ -501,6 +546,22 @@ export function derivePlanetStatePda(walletPubkey: PublicKey, index: number): Pu
   )[0];
 }
 
+/**
+ * Derives the coordinate occupancy lock PDA for a given galaxy/system/position.
+ * Seeds match the Rust program: ["planet_coords", galaxy_le16, system_le16, position_u8]
+ */
+export function derivePlanetCoordsPda(galaxy: number, system: number, position: number): PublicKey {
+  const galaxySeed = Buffer.alloc(2);
+  galaxySeed.writeUInt16LE(galaxy, 0);
+  const systemSeed = Buffer.alloc(2);
+  systemSeed.writeUInt16LE(system, 0);
+  const positionSeed = Buffer.from([position]);
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("planet_coords"), galaxySeed, systemSeed, positionSeed],
+    GAME_STATE_PROGRAM_ID,
+  )[0];
+}
+
 function deriveAuthorizedVaultPda(authority: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(
     [Buffer.from("authorized_vault"), authority.toBuffer()],
@@ -513,6 +574,52 @@ function deriveVaultBackupPda(authority: PublicKey): PublicKey {
     [Buffer.from("vault_backup"), authority.toBuffer()],
     GAME_STATE_PROGRAM_ID,
   )[0];
+}
+
+function deriveGameConfigPda(): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("game_config")],
+    GAME_STATE_PROGRAM_ID,
+  )[0];
+}
+
+// ─── Coord slot helpers ───────────────────────────────────────────────────────
+
+/**
+ * Returns true if the coordinate slot is already occupied (planet_coords PDA exists).
+ */
+async function isCoordOccupied(
+  connection: Connection,
+  galaxy: number,
+  system: number,
+  position: number,
+): Promise<boolean> {
+  const pda = derivePlanetCoordsPda(galaxy, system, position);
+  const info = await connection.getAccountInfo(pda, "confirmed");
+  return info !== null && info.owner.equals(GAME_STATE_PROGRAM_ID);
+}
+
+/**
+ * Derives homeworld coordinates deterministically from the wallet pubkey bytes,
+ * matching the on-chain logic in `initialize_homeworld`.
+ */
+function deriveHomeworldCoordsFromWallet(walletPubkey: PublicKey): { galaxy: number; system: number; position: number } {
+  const b = walletPubkey.toBytes();
+  const galaxy = (b[0] % 9) + 1;
+  const system = (((b[1] | (b[2] << 8)) >>> 0) % 499) + 1;
+  const position = (b[3] % 15) + 1;
+  return { galaxy, system, position };
+}
+
+/**
+ * Generates a random coord candidate within game bounds.
+ */
+function randomCoords(): { galaxy: number; system: number; position: number } {
+  return {
+    galaxy:   Math.floor(Math.random() * 9)   + 1,   // 1–9
+    system:   Math.floor(Math.random() * 499) + 1,   // 1–499
+    position: Math.floor(Math.random() * 15)  + 1,   // 1–15
+  };
 }
 
 // ─── Account Deserializers ────────────────────────────────────────────────────
@@ -553,6 +660,7 @@ function deserializeMission(data: Buffer, offset: number): { mission: Mission; b
   const cargoCrystal = readU64(data, o); o += 8;
   const cargoDeuterium = readU64(data, o); o += 8;
   const applied = readU8(data, o) !== 0; o += 1;
+  const speedFactor = readU8(data, o); o += 1;
 
   return {
     mission: {
@@ -562,7 +670,7 @@ function deserializeMission(data: Buffer, offset: number): { mission: Mission; b
       sSmallCargo, sLargeCargo, sLightFighter, sHeavyFighter, sCruiser,
       sBattleship, sBattlecruiser, sBomber, sDestroyer, sDeathstar,
       sRecycler, sEspionageProbe, sColonyShip,
-      cargoMetal, cargoCrystal, cargoDeuterium, applied,
+      cargoMetal, cargoCrystal, cargoDeuterium, applied, speedFactor,
     },
     bytesRead: o - offset,
   };
@@ -572,6 +680,7 @@ function deserializePlanetState(data: Buffer): PlanetStateAccount {
   if (!data.slice(0, 8).equals(PLANET_STATE_DISCRIMINATOR)) {
     throw new Error("Invalid planet state discriminator.");
   }
+
   let o = 8;
   const authority = readPubkeyRaw(data, o); o += 32;
   const player = readPubkeyRaw(data, o); o += 32;
@@ -610,6 +719,7 @@ function deserializePlanetState(data: Buffer): PlanetStateAccount {
   const buildQueueItem = readU8(data, o); o += 1;
   const buildQueueTarget = readU8(data, o); o += 1;
   const buildFinishTs = readI64(data, o); o += 8;
+
   const metal = readU64(data, o); o += 8;
   const crystal = readU64(data, o); o += 8;
   const deuterium = readU64(data, o); o += 8;
@@ -637,31 +747,39 @@ function deserializePlanetState(data: Buffer): PlanetStateAccount {
   const colonyShip = readU32(data, o); o += 4;
   const solarSatellite = readU32(data, o); o += 4;
   const activeMissions = readU8(data, o); o += 1;
+
   const missions: Mission[] = [];
   for (let i = 0; i < MAX_MISSIONS; i++) {
     const { mission, bytesRead } = deserializeMission(data, o);
     missions.push(mission);
     o += bytesRead;
   }
+
+  const bump = readU8(data, o); o += 1;
+
+  const shipBuildItem = readU8(data, o); o += 1;
+  const shipBuildQty = readU32(data, o); o += 4;
+  const shipBuildFinishTs = readI64(data, o); o += 8;
+
+  void bump;
+
   return {
     authority, player, planetIndex, galaxy, system, position, name,
     diameter, temperature, maxFields, usedFields,
     metalMine, crystalMine, deuteriumSynthesizer, solarPlant, fusionReactor,
-    roboticsFactory, naniteFactory, shipyard, metalStorage, crystalStorage,
-    deuteriumTank, researchLab, missileSilo,
-    energyTech, combustionDrive, impulseDrive, hyperspaceDrive, computerTech,
-    astrophysics, igrNetwork,
+    roboticsFactory, naniteFactory, shipyard,
+    metalStorage, crystalStorage, deuteriumTank, researchLab, missileSilo,
+    energyTech, combustionDrive, impulseDrive, hyperspaceDrive, computerTech, astrophysics, igrNetwork,
     researchQueueItem, researchQueueTarget, researchFinishTs,
     buildQueueItem, buildQueueTarget, buildFinishTs,
+    shipBuildItem, shipBuildQty, shipBuildFinishTs,
     metal, crystal, deuterium,
     metalHour, crystalHour, deuteriumHour,
     energyProduction, energyConsumption,
-    metalCap, crystalCap, deuteriumCap,
-    lastUpdateTs,
-    smallCargo, largeCargo, lightFighter, heavyFighter, cruiser,
-    battleship, battlecruiser, bomber, destroyer, deathstar,
-    recycler, espionageProbe, colonyShip, solarSatellite,
-    activeMissions, missions,
+    metalCap, crystalCap, deuteriumCap, lastUpdateTs,
+    smallCargo, largeCargo, lightFighter, heavyFighter, cruiser, battleship,
+    battlecruiser, bomber, destroyer, deathstar, recycler, espionageProbe,
+    colonyShip, solarSatellite, activeMissions, missions,
   };
 }
 
@@ -696,51 +814,106 @@ function deserializeVaultBackup(data: Buffer): VaultBackupAccount {
   return { authority, vault, version, ciphertext, iv, salt, kdfSalt, updatedAt, bump };
 }
 
+function deserializeGameConfig(data: Buffer): GameConfigAccount {
+  if (!data.slice(0, 8).equals(GAME_CONFIG_DISCRIMINATOR)) {
+    throw new Error("Invalid game config discriminator.");
+  }
+  let o = 8;
+  const admin = readPubkeyRaw(data, o); o += 32;
+  const antimatterMint = readPubkeyRaw(data, o); o += 32;
+  const bump = readU8(data, o);
+  return { admin, antimatterMint, bump };
+}
+
 // ─── Adapters ─────────────────────────────────────────────────────────────────
 function adaptPlanetState(planetPda: PublicKey, account: PlanetStateAccount): PlayerState {
   const authority = account.authority.toBase58();
   const key = planetPda.toBase58();
+
   return {
-    entityPda: key, planetPda: key, fleetPda: key, resourcesPda: key, researchPda: key,
+    entityPda: key,
+    planetPda: key,
+    fleetPda: key,
+    resourcesPda: key,
+    researchPda: key,
     isDelegated: false,
     planet: {
-      creator: authority, entity: key, owner: authority,
-      name: account.name, galaxy: account.galaxy, system: account.system, position: account.position,
-      planetIndex: account.planetIndex, diameter: account.diameter, temperature: account.temperature,
-      maxFields: account.maxFields, usedFields: account.usedFields,
-      metalMine: account.metalMine, crystalMine: account.crystalMine,
-      deuteriumSynthesizer: account.deuteriumSynthesizer, solarPlant: account.solarPlant,
-      fusionReactor: account.fusionReactor, roboticsFactory: account.roboticsFactory,
-      naniteFactory: account.naniteFactory, shipyard: account.shipyard,
-      metalStorage: account.metalStorage, crystalStorage: account.crystalStorage,
-      deuteriumTank: account.deuteriumTank, researchLab: account.researchLab,
+      creator: authority,
+      entity: key,
+      owner: authority,
+      name: account.name,
+      galaxy: account.galaxy,
+      system: account.system,
+      position: account.position,
+      planetIndex: account.planetIndex,
+      diameter: account.diameter,
+      temperature: account.temperature,
+      maxFields: account.maxFields,
+      usedFields: account.usedFields,
+      metalMine: account.metalMine,
+      crystalMine: account.crystalMine,
+      deuteriumSynthesizer: account.deuteriumSynthesizer,
+      solarPlant: account.solarPlant,
+      fusionReactor: account.fusionReactor,
+      roboticsFactory: account.roboticsFactory,
+      naniteFactory: account.naniteFactory,
+      shipyard: account.shipyard,
+      metalStorage: account.metalStorage,
+      crystalStorage: account.crystalStorage,
+      deuteriumTank: account.deuteriumTank,
+      researchLab: account.researchLab,
       missileSilo: account.missileSilo,
-      buildQueueItem: account.buildQueueItem, buildQueueTarget: account.buildQueueTarget,
+      buildQueueItem: account.buildQueueItem,
+      buildQueueTarget: account.buildQueueTarget,
       buildFinishTs: account.buildFinishTs,
+      shipBuildItem: account.shipBuildItem,
+      shipBuildQty: account.shipBuildQty,
+      shipBuildFinishTs: account.shipBuildFinishTs,
     },
     resources: {
-      metal: account.metal, crystal: account.crystal, deuterium: account.deuterium,
-      metalHour: account.metalHour, crystalHour: account.crystalHour, deuteriumHour: account.deuteriumHour,
-      energyProduction: account.energyProduction, energyConsumption: account.energyConsumption,
-      metalCap: account.metalCap, crystalCap: account.crystalCap, deuteriumCap: account.deuteriumCap,
+      metal: account.metal,
+      crystal: account.crystal,
+      deuterium: account.deuterium,
+      metalHour: account.metalHour,
+      crystalHour: account.crystalHour,
+      deuteriumHour: account.deuteriumHour,
+      energyProduction: account.energyProduction,
+      energyConsumption: account.energyConsumption,
+      metalCap: account.metalCap,
+      crystalCap: account.crystalCap,
+      deuteriumCap: account.deuteriumCap,
       lastUpdateTs: account.lastUpdateTs,
     },
     fleet: {
       creator: authority,
-      smallCargo: account.smallCargo, largeCargo: account.largeCargo,
-      lightFighter: account.lightFighter, heavyFighter: account.heavyFighter,
-      cruiser: account.cruiser, battleship: account.battleship, battlecruiser: account.battlecruiser,
-      bomber: account.bomber, destroyer: account.destroyer, deathstar: account.deathstar,
-      recycler: account.recycler, espionageProbe: account.espionageProbe,
-      colonyShip: account.colonyShip, solarSatellite: account.solarSatellite,
-      activeMissions: account.activeMissions, missions: account.missions,
+      smallCargo: account.smallCargo,
+      largeCargo: account.largeCargo,
+      lightFighter: account.lightFighter,
+      heavyFighter: account.heavyFighter,
+      cruiser: account.cruiser,
+      battleship: account.battleship,
+      battlecruiser: account.battlecruiser,
+      bomber: account.bomber,
+      destroyer: account.destroyer,
+      deathstar: account.deathstar,
+      recycler: account.recycler,
+      espionageProbe: account.espionageProbe,
+      colonyShip: account.colonyShip,
+      solarSatellite: account.solarSatellite,
+      activeMissions: account.activeMissions,
+      missions: account.missions,
     },
     research: {
       creator: authority,
-      energyTech: account.energyTech, combustionDrive: account.combustionDrive,
-      impulseDrive: account.impulseDrive, hyperspaceDrive: account.hyperspaceDrive,
-      computerTech: account.computerTech, astrophysics: account.astrophysics, igrNetwork: account.igrNetwork,
-      queueItem: account.researchQueueItem, queueTarget: account.researchQueueTarget,
+      energyTech: account.energyTech,
+      combustionDrive: account.combustionDrive,
+      impulseDrive: account.impulseDrive,
+      hyperspaceDrive: account.hyperspaceDrive,
+      computerTech: account.computerTech,
+      astrophysics: account.astrophysics,
+      igrNetwork: account.igrNetwork,
+      queueItem: account.researchQueueItem,
+      queueTarget: account.researchQueueTarget,
       researchFinishTs: account.researchFinishTs,
     },
   };
@@ -770,8 +943,6 @@ function asCryptoBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   return out as Uint8Array<ArrayBuffer>;
 }
 
-
-
 function buildVaultRecoveryMessage(authority: PublicKey, salt: Uint8Array): Uint8Array {
   return utf8Bytes(
     `${VAULT_RECOVERY_MESSAGE_PREFIX}\nAuthority:${authority.toBase58()}\nSalt:${bytesToBase64(salt)}`,
@@ -789,9 +960,10 @@ export class GameClient {
   private options: GameClientOptions;
   private vaultKeypair: Keypair | null = null;
   private vaultRecoveryPassphrase: string | null = null;
-private preferVaultSigning = true;
-
-
+  private preferVaultSigning = true;
+  // Set to true when a backup was found on-chain but decryption failed (wrong password).
+  // Allows the UI to distinguish "no backup" from "wrong password".
+  private vaultBackupDecryptFailed = false;
 
   constructor(connection: Connection, provider: AnchorProvider, options: GameClientOptions = {}) {
     this.connection = connection;
@@ -808,19 +980,44 @@ private preferVaultSigning = true;
     return this.vaultKeypair !== null;
   }
 
+  /**
+   * Returns a structured vault status for the UI to show appropriate recovery options.
+   * Call after ensureVault() has been attempted.
+   */
+  async getVaultStatus(): Promise<VaultStatus> {
+    if (this.vaultKeypair !== null) return "ready";
+    if (this.vaultBackupDecryptFailed) return "wrong_password";
+    // Check if a backup exists at all
+    const backup = await this.fetchVaultBackup();
+    if (!backup) return "backup_missing";
+    return "wrong_password"; // backup exists but we haven't decrypted it yet
+  }
+
+  /**
+   * Best-effort restore of an existing vault for the connected wallet.
+   * This never creates a new vault or writes on-chain state.
+   */
+  async restoreExistingVault(reportProgress?: ProgressReporter): Promise<Keypair | null> {
+    if (this.vaultKeypair) return this.vaultKeypair;
+
+    const cached = await this.tryRestoreVaultFromLocalCache();
+    if (cached) return cached;
+
+    return this.tryRestoreVaultFromBackup(reportProgress);
+  }
+
   clearCachedVaultRecoveryPassphrase(): void {
     this.vaultRecoveryPassphrase = null;
-
-    
   }
 
   setPreferVaultSigning(value: boolean): void {
-  this.preferVaultSigning = value;
-}
+    this.preferVaultSigning = value;
+  }
 
-getPreferVaultSigning(): boolean {
-  return this.preferVaultSigning;
-}
+  getPreferVaultSigning(): boolean {
+    return this.preferVaultSigning;
+  }
+
   // ── Crypto helpers ──────────────────────────────────────────────────────────
   private async promptVaultRecoveryPassphrase(createIfMissing: boolean): Promise<string> {
     if (this.vaultRecoveryPassphrase) return this.vaultRecoveryPassphrase;
@@ -852,57 +1049,57 @@ getPreferVaultSigning(): boolean {
       "Pass `requestVaultRecoveryPassphrase` in GameClientOptions.",
     );
   }
-async withdrawVaultLamports(lamports: number): Promise<string> {
-  if (!this.vaultKeypair) throw new Error("Vault is not ready.");
-  if (lamports <= 0) throw new Error("Invalid withdraw amount.");
 
-  const tx = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: this.vaultKeypair.publicKey,
-      toPubkey: this.provider.wallet.publicKey,
-      lamports,
-    }),
-  );
+  async withdrawVaultLamports(lamports: number): Promise<string> {
+    if (!this.vaultKeypair) throw new Error("Vault is not ready.");
+    if (lamports <= 0) throw new Error("Invalid withdraw amount.");
 
-  const { blockhash, lastValidBlockHeight } =
-    await this.connection.getLatestBlockhash("confirmed");
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: this.vaultKeypair.publicKey,
+        toPubkey: this.provider.wallet.publicKey,
+        lamports,
+      }),
+    );
 
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = this.vaultKeypair.publicKey;
-  tx.sign(this.vaultKeypair);
+    const { blockhash, lastValidBlockHeight } =
+      await this.connection.getLatestBlockhash("confirmed");
 
-  const sig = await this.connection.sendRawTransaction(tx.serialize(), {
-    skipPreflight: false,
-    preflightCommitment: "confirmed",
-  });
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = this.vaultKeypair.publicKey;
+    tx.sign(this.vaultKeypair);
 
-  await this.connection.confirmTransaction(
-    { signature: sig, blockhash, lastValidBlockHeight },
-    "confirmed",
-  );
+    const sig = await this.connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+    });
 
-  return sig;
-}
+    await this.connection.confirmTransaction(
+      { signature: sig, blockhash, lastValidBlockHeight },
+      "confirmed",
+    );
 
-async depositToVaultLamports(lamports: number): Promise<string> {
-  if (!this.vaultKeypair) throw new Error("Vault is not ready.");
-  if (!Number.isFinite(lamports) || lamports <= 0) {
-    throw new Error("Invalid deposit amount.");
+    return sig;
   }
 
-  const tx = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: this.provider.wallet.publicKey,
-      toPubkey: this.vaultKeypair.publicKey,
-      lamports,
-    }),
-  );
+  async depositToVaultLamports(lamports: number): Promise<string> {
+    if (!this.vaultKeypair) throw new Error("Vault is not ready.");
+    if (!Number.isFinite(lamports) || lamports <= 0) {
+      throw new Error("Invalid deposit amount.");
+    }
 
-  tx.feePayer = this.provider.wallet.publicKey;
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: this.provider.wallet.publicKey,
+        toPubkey: this.vaultKeypair.publicKey,
+        lamports,
+      }),
+    );
 
-  return this.provider.sendAndConfirm(tx, [], { commitment: "confirmed" });
-}
+    tx.feePayer = this.provider.wallet.publicKey;
 
+    return this.provider.sendAndConfirm(tx, [], { commitment: "confirmed" });
+  }
 
   private getCacheDeviceKeyBytes(): Uint8Array | null {
     if (typeof localStorage === "undefined") return null;
@@ -1044,6 +1241,34 @@ async depositToVaultLamports(lamports: number): Promise<string> {
     catch { return null; }
   }
 
+  async getGameConfig(): Promise<GameConfigState | null> {
+    const gameConfigPda = deriveGameConfigPda();
+    const account = await this.connection.getAccountInfo(gameConfigPda, "confirmed");
+    if (!account?.owner.equals(GAME_STATE_PROGRAM_ID)) return null;
+    try {
+      const config = deserializeGameConfig(Buffer.from(account.data));
+      return {
+        admin: config.admin.toBase58(),
+        antimatterMint: config.antimatterMint.toBase58(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async findUserTokenAccountForMint(owner: PublicKey, mint: PublicKey): Promise<PublicKey> {
+    const response = await this.connection.getParsedTokenAccountsByOwner(
+      owner,
+      { mint, programId: TOKEN_PROGRAM_ID },
+      "confirmed",
+    );
+    const first = response.value[0];
+    if (!first) {
+      throw new Error(`No token account found for mint ${mint.toBase58()}.`);
+    }
+    return first.pubkey;
+  }
+
   private async tryRestoreVaultFromBackup(reportProgress?: ProgressReporter): Promise<Keypair | null> {
     const backup = await this.fetchVaultBackup();
     if (!backup) {
@@ -1051,7 +1276,18 @@ async depositToVaultLamports(lamports: number): Promise<string> {
       return null;
     }
     reportProgress?.("Restoring vault from encrypted on-chain backup...");
-    const vault = await this.decryptVaultSecretKey(backup);
+    let vault: Keypair;
+    try {
+      vault = await this.decryptVaultSecretKey(backup);
+    } catch (err) {
+      // Wrong password or corrupted backup — mark the flag so the UI can
+      // show a "wrong password" recovery option rather than a generic error.
+      console.warn("[GAME_STATE:vault_backup] decryption failed", err);
+      this.vaultBackupDecryptFailed = true;
+      this.clearCachedVaultRecoveryPassphrase();
+      return null;
+    }
+    this.vaultBackupDecryptFailed = false;
     const balance = await this.connection.getBalance(vault.publicKey, "confirmed");
     if (balance < VAULT_MIN_BALANCE_LAMPORTS) {
       const topUp = VAULT_TARGET_BALANCE_LAMPORTS - balance;
@@ -1075,15 +1311,12 @@ async depositToVaultLamports(lamports: number): Promise<string> {
 
   // ── Vault setup ─────────────────────────────────────────────────────────────
   async ensureVault(reportProgress?: ProgressReporter): Promise<Keypair> {
-    // 1. Try local cache first (no popup)
     const cached = await this.tryRestoreVaultFromLocalCache();
     if (cached) return cached;
 
-    // 2. Try on-chain backup (asks for password)
     const restored = await this.tryRestoreVaultFromBackup(reportProgress);
     if (restored) return restored;
 
-    // 3. Generate fresh vault
     const vault = Keypair.generate();
     reportProgress?.("Signing with wallet: funding fresh vault keypair");
     const fundTx = new Transaction().add(
@@ -1100,52 +1333,49 @@ async depositToVaultLamports(lamports: number): Promise<string> {
   }
 
   // ── Instruction senders ──────────────────────────────────────────────────────
-private async sendInstruction(
-  instructions: TransactionInstruction[],
-  extraSigners: Keypair[] = [],
-): Promise<string> {
-  const fullInstructions = [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
-    ...instructions,
-  ];
+  private async sendInstruction(
+    instructions: TransactionInstruction[],
+    extraSigners: Keypair[] = [],
+  ): Promise<string> {
+    const fullInstructions = [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+      ...instructions,
+    ];
 
-  const tx = new Transaction().add(...fullInstructions);
+    const tx = new Transaction().add(...fullInstructions);
 
-  const { blockhash, lastValidBlockHeight } =
-    await this.connection.getLatestBlockhash("confirmed");
+    const { blockhash, lastValidBlockHeight } =
+      await this.connection.getLatestBlockhash("confirmed");
 
-  tx.recentBlockhash = blockhash;
+    tx.recentBlockhash = blockhash;
 
-  // If we have a vault signer in this tx, make the vault the fee payer and
-  // do NOT use the Anchor provider / wallet adapter path.
-  if (extraSigners.length > 0) {
-    tx.feePayer = extraSigners[0].publicKey;
-    tx.sign(...extraSigners);
+    if (extraSigners.length > 0) {
+      tx.feePayer = extraSigners[0].publicKey;
+      tx.sign(...extraSigners);
 
-    const sig = await this.connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: false,
-      preflightCommitment: "confirmed",
-    });
+      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
 
-    await this.connection.confirmTransaction(
-      { signature: sig, blockhash, lastValidBlockHeight },
-      "confirmed",
-    );
+      await this.connection.confirmTransaction(
+        { signature: sig, blockhash, lastValidBlockHeight },
+        "confirmed",
+      );
 
-    return sig;
+      return sig;
+    }
+
+    tx.feePayer = this.provider.wallet.publicKey;
+    return this.provider.sendAndConfirm(tx, [], { commitment: "confirmed" });
   }
 
-  // Wallet-only path
-  tx.feePayer = this.provider.wallet.publicKey;
-  return this.provider.sendAndConfirm(tx, [], { commitment: "confirmed" });
-}
-
-private vaultSigners(): Keypair[] {
-  return this.preferVaultSigning && this.vaultKeypair
-    ? [this.vaultKeypair]
-    : [];
-}
+  private vaultSigners(): Keypair[] {
+    return this.preferVaultSigning && this.vaultKeypair
+      ? [this.vaultKeypair]
+      : [];
+  }
 
   // ── Player / vault initialization ────────────────────────────────────────────
   async initializePlayer(reportProgress?: ProgressReporter): Promise<void> {
@@ -1154,10 +1384,8 @@ private vaultSigners(): Keypair[] {
     const authorizedVaultPda = deriveAuthorizedVaultPda(authority);
     const vaultBackupPda = deriveVaultBackupPda(authority);
 
-    // Check if already initialized
     const existing = await this.connection.getAccountInfo(profilePda, "confirmed");
     if (existing) {
-      // Profile exists, just ensure vault is loaded
       await this.ensureVault(reportProgress);
       return;
     }
@@ -1171,17 +1399,17 @@ private vaultSigners(): Keypair[] {
     const ix = new TransactionInstruction({
       programId: GAME_STATE_PROGRAM_ID,
       keys: [
-        { pubkey: authority,          isSigner: true,  isWritable: true  }, // authority (wallet)
-        { pubkey: profilePda,         isSigner: false, isWritable: true  }, // player_profile
-        { pubkey: authorizedVaultPda, isSigner: false, isWritable: true  }, // authorized_vault
-        { pubkey: vaultBackupPda,     isSigner: false, isWritable: true  }, // vault_backup
+        { pubkey: authority,          isSigner: true,  isWritable: true  },
+        { pubkey: profilePda,         isSigner: false, isWritable: true  },
+        { pubkey: authorizedVaultPda, isSigner: false, isWritable: true  },
+        { pubkey: vaultBackupPda,     isSigner: false, isWritable: true  },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
       data: encodeInstruction(
         IX.initializePlayer,
         encodeInitializePlayerArgs(
           vault.publicKey,
-          0, // expires_at = 0 (never)
+          0,
           VAULT_BACKUP_VERSION,
           encrypted.ciphertext,
           encrypted.iv,
@@ -1239,7 +1467,160 @@ private vaultSigners(): Keypair[] {
     await this.persistLocalVaultCache(newVault);
   }
 
-  // ── Planet creation ──────────────────────────────────────────────────────────
+  /**
+   * Emergency vault recovery — generates a brand new vault keypair and updates
+   * the on-chain backup, even if the current vault keypair is lost or the
+   * existing backup can't be decrypted.
+   *
+   * Requires one wallet signature. Use this when:
+   * - The vault account SOL was drained and the keypair is no longer accessible
+   * - The recovery password was forgotten and the backup can't be decrypted
+   * - The vault keypair was compromised
+   *
+   * After this call the old vault keypair (if any) is abandoned. Its remaining
+   * SOL is NOT recovered — the user should withdraw before calling this if
+   * they still have access to the old vault.
+   */
+  async initializeGameConfig(antimatterMint: PublicKey): Promise<string> {
+    const admin = this.provider.wallet.publicKey;
+    const gameConfigPda = deriveGameConfigPda();
+
+    const ix = new TransactionInstruction({
+      programId: GAME_STATE_PROGRAM_ID,
+      keys: [
+        { pubkey: admin, isSigner: true, isWritable: true },
+        { pubkey: gameConfigPda, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: encodeInstruction(IX.initializeGameConfig, encodePubkeyArg(antimatterMint)),
+    });
+
+    return this.sendInstruction([ix]);
+  }
+
+  async updateAntimatterMint(antimatterMint: PublicKey): Promise<string> {
+    const admin = this.provider.wallet.publicKey;
+    const gameConfigPda = deriveGameConfigPda();
+
+    const ix = new TransactionInstruction({
+      programId: GAME_STATE_PROGRAM_ID,
+      keys: [
+        { pubkey: admin, isSigner: true, isWritable: true },
+        { pubkey: gameConfigPda, isSigner: false, isWritable: true },
+      ],
+      data: encodeInstruction(IX.updateAntimatterMint, encodePubkeyArg(antimatterMint)),
+    });
+
+    return this.sendInstruction([ix]);
+  }
+
+  private async accelerateWithAntimatter(
+    entityPda: PublicKey,
+    discriminator: Buffer,
+  ): Promise<string> {
+    const authority = this.provider.wallet.publicKey;
+    const gameConfigPda = deriveGameConfigPda();
+    const config = await this.getGameConfig();
+    if (!config) {
+      throw new Error("Game config is not initialized.");
+    }
+
+    const antimatterMint = new PublicKey(config.antimatterMint);
+    const userAntimatterAccount = await this.findUserTokenAccountForMint(authority, antimatterMint);
+    const ix = new TransactionInstruction({
+      programId: GAME_STATE_PROGRAM_ID,
+      keys: [
+        { pubkey: authority, isSigner: true, isWritable: true },
+        { pubkey: gameConfigPda, isSigner: false, isWritable: false },
+        { pubkey: entityPda, isSigner: false, isWritable: true },
+        { pubkey: antimatterMint, isSigner: false, isWritable: true },
+        { pubkey: userAntimatterAccount, isSigner: false, isWritable: true },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      ],
+      data: encodeInstruction(discriminator),
+    });
+
+    return this.sendInstruction([ix]);
+  }
+
+  async accelerateBuildWithAntimatter(entityPda: PublicKey): Promise<string> {
+    return this.accelerateWithAntimatter(entityPda, IX.accelerateBuildWithAntimatter);
+  }
+
+  async accelerateResearchWithAntimatter(entityPda: PublicKey): Promise<string> {
+    return this.accelerateWithAntimatter(entityPda, IX.accelerateResearchWithAntimatter);
+  }
+
+  async accelerateShipBuildWithAntimatter(entityPda: PublicKey): Promise<string> {
+    return this.accelerateWithAntimatter(entityPda, IX.accelerateShipBuildWithAntimatter);
+  }
+
+  async forceRotateVault(reportProgress?: ProgressReporter): Promise<void> {
+    const authority = this.provider.wallet.publicKey;
+    const authorizedVaultPda = deriveAuthorizedVaultPda(authority);
+    const vaultBackupPda = deriveVaultBackupPda(authority);
+
+    // Clear any stale cached state
+    this.vaultKeypair = null;
+    this.vaultBackupDecryptFailed = false;
+    this.clearCachedVaultRecoveryPassphrase();
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(vaultLocalCacheKey(authority));
+    }
+
+    const newVault = Keypair.generate();
+    reportProgress?.("Signing with wallet: funding new vault keypair");
+    const fundTx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: authority,
+        toPubkey: newVault.publicKey,
+        lamports: VAULT_TARGET_BALANCE_LAMPORTS,
+      }),
+    );
+    await this.provider.sendAndConfirm(fundTx, [], { commitment: "confirmed" });
+
+    const encrypted = await this.encryptVaultSecretKey(newVault);
+
+    reportProgress?.("Signing with wallet: updating vault on-chain");
+    const ix = new TransactionInstruction({
+      programId: GAME_STATE_PROGRAM_ID,
+      keys: [
+        { pubkey: authority,          isSigner: true,  isWritable: true  },
+        { pubkey: authorizedVaultPda, isSigner: false, isWritable: true  },
+        { pubkey: vaultBackupPda,     isSigner: false, isWritable: true  },
+      ],
+      data: encodeInstruction(
+        IX.rotateVault,
+        encodeRotateVaultArgs(
+          newVault.publicKey,
+          0,
+          VAULT_BACKUP_VERSION,
+          encrypted.ciphertext,
+          encrypted.iv,
+          encrypted.salt,
+          encrypted.kdfSalt,
+        ),
+      ),
+    });
+
+    await this.sendInstruction([ix]);
+    this.vaultKeypair = newVault;
+    await this.persistLocalVaultCache(newVault);
+    reportProgress?.("Vault recovered successfully.");
+  }
+
+  /**
+   * Retry vault restoration with a fresh password attempt.
+   * Call this when the user wants to try a different password after a
+   * `wrong_password` status. Clears the cached passphrase and retries
+   * `tryRestoreVaultFromBackup`.
+   */
+  async retryVaultPassword(reportProgress?: ProgressReporter): Promise<boolean> {
+    this.clearCachedVaultRecoveryPassphrase();
+    this.vaultBackupDecryptFailed = false;
+    const restored = await this.tryRestoreVaultFromBackup(reportProgress);
+    return restored !== null;
+  }
   private async fetchPlayerProfile(walletPubkey: PublicKey): Promise<PlayerProfileAccount | null> {
     const profilePda = derivePlayerProfilePda(walletPubkey);
     const account = await this.connection.getAccountInfo(profilePda, "confirmed");
@@ -1248,14 +1629,75 @@ private vaultSigners(): Keypair[] {
     catch { return null; }
   }
 
+  /**
+   * Builds and sends an `initialize_homeworld` or `initialize_colony` tx
+   * for explicit coordinates. Does NOT retry — caller decides on collision.
+   *
+   * Returns the planet_state PDA on success.
+   * Throws if the tx fails (e.g. coords already occupied).
+   */
+  private async sendInitializePlanetTx(opts: {
+    isHomeworld: boolean;
+    authority: PublicKey;
+    vault: Keypair;
+    playerProfilePda: PublicKey;
+    authorizedVaultPda: PublicKey;
+    nextIndex: number;
+    galaxy: number;
+    system: number;
+    position: number;
+    planetName: string;
+    now: number;
+    /** Only for colony */
+    mission?: Mission;
+  }): Promise<PublicKey> {
+    const {
+      isHomeworld, authority, vault, playerProfilePda, authorizedVaultPda,
+      nextIndex, galaxy, system, position, planetName, now, mission,
+    } = opts;
+
+    const planetStatePda = derivePlanetStatePda(authority, nextIndex);
+    const planetCoordsPda = derivePlanetCoordsPda(galaxy, system, position);
+
+    const args = isHomeworld
+      ? encodeHomeworldArgs(now, planetName.trim() || "Homeworld", galaxy, system, position)
+      : encodeColonyArgs(now, mission!);
+
+    const discriminator = isHomeworld ? IX.initializeHomeworld : IX.initializeColony;
+
+    const ix = new TransactionInstruction({
+      programId: GAME_STATE_PROGRAM_ID,
+      keys: [
+        { pubkey: vault.publicKey,    isSigner: true,  isWritable: true  }, // vault_signer (payer)
+        { pubkey: authority,          isSigner: false, isWritable: false }, // authority
+        { pubkey: authorizedVaultPda, isSigner: false, isWritable: false }, // authorized_vault
+        { pubkey: playerProfilePda,   isSigner: false, isWritable: true  }, // player_profile
+        { pubkey: planetStatePda,     isSigner: false, isWritable: true  }, // planet_state
+        { pubkey: planetCoordsPda,    isSigner: false, isWritable: true  }, // planet_coords (new)
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: encodeInstruction(discriminator, args),
+    });
+
+    await this.sendInstruction([ix], [vault]);
+    return planetStatePda;
+  }
+
+  /**
+   * Initialize a homeworld planet.
+   *
+   * Flow:
+   * 1. Try the deterministic coords derived from the wallet pubkey (matching on-chain logic).
+   * 2. If that slot is occupied, retry with random coords up to HOMEWORLD_MAX_COORD_ATTEMPTS.
+   * 3. Each attempt verifies the coord PDA off-chain first to avoid burning a tx fee on a known collision.
+   * 4. Attempt the tx; if it still fails (race condition), retry with the next candidate.
+   */
   async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReporter): Promise<PlayerState> {
     const authority = this.provider.wallet.publicKey;
 
-    // Ensure vault is ready
     await this.ensureVault(reportProgress);
     const vault = this.vaultKeypair!;
 
-    // Ensure player profile + vault exists on-chain
     const profile = await this.fetchPlayerProfile(authority);
     if (!profile) {
       await this.initializePlayer(reportProgress);
@@ -1265,31 +1707,58 @@ private vaultSigners(): Keypair[] {
     const nextIndex = updatedProfile?.planetCount ?? 0;
     const playerProfilePda = derivePlayerProfilePda(authority);
     const authorizedVaultPda = deriveAuthorizedVaultPda(authority);
-    const planetStatePda = derivePlanetStatePda(authority, nextIndex);
+    const now = Math.floor(Date.now() / 1000);
 
-    reportProgress?.("Vault signing: creating homeworld");
+    // Build candidate list: deterministic first, then random fallbacks
+    const deterministicCoords = deriveHomeworldCoordsFromWallet(authority);
+    const candidates: Array<{ galaxy: number; system: number; position: number }> = [
+      deterministicCoords,
+    ];
+    for (let i = 1; i < HOMEWORLD_MAX_COORD_ATTEMPTS; i++) {
+      candidates.push(randomCoords());
+    }
 
-    const ix = new TransactionInstruction({
-      programId: GAME_STATE_PROGRAM_ID,
-      keys: [
-        { pubkey: vault.publicKey,    isSigner: true,  isWritable: true  }, // vault_signer (payer)
-        { pubkey: authority,          isSigner: false, isWritable: false }, // authority (wallet, not signing)
-        { pubkey: authorizedVaultPda, isSigner: false, isWritable: false }, // authorized_vault
-        { pubkey: playerProfilePda,   isSigner: false, isWritable: true  }, // player_profile
-        { pubkey: planetStatePda,     isSigner: false, isWritable: true  }, // planet_state
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      ],
-      data: encodeInstruction(
-        IX.initializeHomeworld,
-        encodeHomeworldArgs(Math.floor(Date.now() / 1000), planetName.trim() || "Homeworld"),
-      ),
-    });
+    let lastError: unknown = new Error("All coordinate candidates were occupied.");
 
-    await this.sendInstruction([ix], [vault]);
+    for (const coords of candidates) {
+      const { galaxy, system, position } = coords;
 
-    const state = await this.loadPlanetStateByPda(planetStatePda);
-    if (!state) throw new Error("Planet created but could not be loaded.");
-    return state;
+      // Fast off-chain check — skip if already occupied
+      const occupied = await isCoordOccupied(this.connection, galaxy, system, position);
+      if (occupied) {
+        console.log(`[GAME_STATE:homeworld] slot ${galaxy}:${system}:${position} occupied, trying next`);
+        continue;
+      }
+
+      reportProgress?.(`Vault signing: creating homeworld at [${galaxy}:${system}:${position}]`);
+
+      try {
+        const planetStatePda = await this.sendInitializePlanetTx({
+          isHomeworld: true,
+          authority,
+          vault,
+          playerProfilePda,
+          authorizedVaultPda,
+          nextIndex,
+          galaxy,
+          system,
+          position,
+          planetName,
+          now,
+        });
+
+        const state = await this.loadPlanetStateByPda(planetStatePda);
+        if (!state) throw new Error("Planet created but could not be loaded.");
+        return state;
+      } catch (err) {
+        // Tx failed — could be a race condition where someone else claimed the slot.
+        // Log and try the next candidate.
+        console.warn(`[GAME_STATE:homeworld] tx failed for ${galaxy}:${system}:${position}:`, describeTxError(err));
+        lastError = err;
+      }
+    }
+
+    throw lastError;
   }
 
   // ── Planet loading ───────────────────────────────────────────────────────────
@@ -1329,6 +1798,14 @@ private vaultSigners(): Keypair[] {
     return planets.sort((a, b) => a.position - b.position);
   }
 
+  /**
+   * Check if a coordinate slot is free without sending a tx.
+   * Useful for the colonize UI to show occupied/free before the player commits.
+   */
+  async isCoordFree(galaxy: number, system: number, position: number): Promise<boolean> {
+    return !(await isCoordOccupied(this.connection, galaxy, system, position));
+  }
+
   // ── Vault-signed planet mutation helper ──────────────────────────────────────
   private buildVaultMutationInstruction(
     vaultDiscriminator: Buffer,
@@ -1337,20 +1814,19 @@ private vaultSigners(): Keypair[] {
     planetAuthority: PublicKey,
     args: Buffer,
   ): TransactionInstruction {
-if (this.preferVaultSigning && this.vaultKeypair) {
+    if (this.preferVaultSigning && this.vaultKeypair) {
       const authorizedVaultPda = deriveAuthorizedVaultPda(planetAuthority);
       return new TransactionInstruction({
         programId: GAME_STATE_PROGRAM_ID,
         keys: [
-          { pubkey: this.vaultKeypair.publicKey, isSigner: true,  isWritable: true  }, // vault_signer
-          { pubkey: authorizedVaultPda,           isSigner: false, isWritable: false }, // authorized_vault
-          { pubkey: planetPda,                    isSigner: false, isWritable: true  }, // planet_state
+          { pubkey: this.vaultKeypair.publicKey, isSigner: true,  isWritable: true  },
+          { pubkey: authorizedVaultPda,           isSigner: false, isWritable: false },
+          { pubkey: planetPda,                    isSigner: false, isWritable: true  },
         ],
         data: encodeInstruction(vaultDiscriminator, args),
       });
     }
 
-    // Fallback: wallet signs directly
     return new TransactionInstruction({
       programId: GAME_STATE_PROGRAM_ID,
       keys: [
@@ -1367,7 +1843,7 @@ if (this.preferVaultSigning && this.vaultKeypair) {
     planetAuthority: PublicKey,
     args: Buffer,
   ): TransactionInstruction {
-if (this.preferVaultSigning && this.vaultKeypair) {
+    if (this.preferVaultSigning && this.vaultKeypair) {
       const authorizedVaultPda = deriveAuthorizedVaultPda(planetAuthority);
       return new TransactionInstruction({
         programId: GAME_STATE_PROGRAM_ID,
@@ -1398,11 +1874,8 @@ if (this.preferVaultSigning && this.vaultKeypair) {
     const writer = new BorshWriter();
     writer.writeU8(buildingIdx);
     writer.writeI64(Math.floor(Date.now() / 1000));
-
-    // Need authority — load planet to get it
     const state = await this.loadPlanetStateByPda(entityPda);
     const authority = state ? new PublicKey(state.planet.owner) : this.provider.wallet.publicKey;
-
     return this.sendInstruction(
       [this.buildVaultMutationInstruction(IX.startBuildVault, IX.startBuild, entityPda, authority, writer.toBuffer())],
       this.vaultSigners(),
@@ -1462,12 +1935,29 @@ if (this.preferVaultSigning && this.vaultKeypair) {
     );
   }
 
+  async finishShipBuild(entityPda: PublicKey): Promise<string> {
+    await this.ensureVault();
+    const writer = new BorshWriter();
+    writer.writeI64(Math.floor(Date.now() / 1000));
+    const state = await this.loadPlanetStateByPda(entityPda);
+    const authority = state ? new PublicKey(state.planet.owner) : this.provider.wallet.publicKey;
+    return this.sendInstruction(
+      [this.buildVaultMutationInstruction(
+        IX.finishShipBuildVault,
+        IX.finishShipBuild,
+        entityPda,
+        authority,
+        writer.toBuffer(),
+      )],
+      this.vaultSigners(),
+    );
+  }
+
   async launchFleet(
     entityPda: PublicKey,
     ships: { lf?: number; hf?: number; cr?: number; bs?: number; bc?: number; bm?: number; ds?: number; de?: number; sc?: number; lc?: number; rec?: number; ep?: number; col?: number },
     cargo: { metal?: bigint; crystal?: bigint; deuterium?: bigint },
     missionType: number,
-    flightSeconds: number,
     speedFactor = 100,
     target?: LaunchFleetTarget,
   ): Promise<string> {
@@ -1475,19 +1965,37 @@ if (this.preferVaultSigning && this.vaultKeypair) {
     await this.ensureVault();
     const state = await this.loadPlanetStateByPda(entityPda);
     const authority = state ? new PublicKey(state.planet.owner) : this.provider.wallet.publicKey;
+
     return this.sendInstruction(
       [this.buildVaultMutationInstruction(
         IX.launchFleetVault,
         IX.launchFleet,
         entityPda,
         authority,
-        encodeLaunchFleetArgs(ships, cargo, missionType, speedFactor, Math.floor(Date.now() / 1000), flightSeconds, target),
+        encodeLaunchFleetArgs(
+          ships,
+          cargo,
+          missionType,
+          speedFactor,
+          Math.floor(Date.now() / 1000),
+          target,
+        ),
       )],
       this.vaultSigners(),
     );
   }
 
   private async findPlanetByCoordinates(galaxy: number, system: number, position: number): Promise<PublicKey | null> {
+    // Fast path: look up via planet_coords PDA
+    const coordsPda = derivePlanetCoordsPda(galaxy, system, position);
+    const coordsAccount = await this.connection.getAccountInfo(coordsPda, "confirmed");
+    if (coordsAccount && coordsAccount.owner.equals(GAME_STATE_PROGRAM_ID) && coordsAccount.data.length >= 8 + 5 + 32 + 32 + 1) {
+      // planet field is at offset 8 (disc) + 2 + 2 + 1 (galaxy/system/position) = offset 13
+      const planet = new PublicKey(coordsAccount.data.slice(13, 13 + 32));
+      return planet;
+    }
+
+    // Fallback: scan all program accounts (slow, kept for safety)
     const accounts = await this.connection.getProgramAccounts(GAME_STATE_PROGRAM_ID, { commitment: "confirmed" });
     for (const account of accounts) {
       if (!account.account.data.slice(0, 8).equals(PLANET_STATE_DISCRIMINATOR)) continue;
@@ -1518,6 +2026,15 @@ if (this.preferVaultSigning && this.vaultKeypair) {
     );
   }
 
+  /**
+   * Resolve a colonize mission.
+   *
+   * Flow:
+   * 1. Create the colony planet + coord lock (initialize_colony) — vault pays rent.
+   * 2. Resolve the colonize mission on the source planet — clears the mission slot.
+   *
+   * Both steps use the vault keypair, no wallet popup needed.
+   */
   async resolveColonize(
     sourceEntityPda: PublicKey,
     mission: Mission,
@@ -1529,22 +2046,42 @@ if (this.preferVaultSigning && this.vaultKeypair) {
     const vault = this.vaultKeypair!;
     const authority = this.provider.wallet.publicKey;
 
+    // Verify the target slot is free before committing
+    const occupied = await isCoordOccupied(
+      this.connection,
+      mission.targetGalaxy,
+      mission.targetSystem,
+      mission.targetPosition,
+    );
+    if (occupied) {
+      throw new Error(
+        `Colony slot [${mission.targetGalaxy}:${mission.targetSystem}:${mission.targetPosition}] is already occupied.`,
+      );
+    }
+
     const profile = await this.fetchPlayerProfile(authority);
     const nextIndex = profile?.planetCount ?? 0;
     const playerProfilePda = derivePlayerProfilePda(authority);
     const authorizedVaultPda = deriveAuthorizedVaultPda(authority);
     const colonyPda = derivePlanetStatePda(authority, nextIndex);
+    const colonyCoordsPda = derivePlanetCoordsPda(
+      mission.targetGalaxy,
+      mission.targetSystem,
+      mission.targetPosition,
+    );
 
-    reportProgress?.("Vault signing: creating colony");
+    // ── Step 1: initialize colony planet + coords ──────────────────────────
+    reportProgress?.("Vault signing: creating colony planet");
 
     const initIx = new TransactionInstruction({
       programId: GAME_STATE_PROGRAM_ID,
       keys: [
-        { pubkey: vault.publicKey,    isSigner: true,  isWritable: true  },
-        { pubkey: authority,          isSigner: false, isWritable: false },
-        { pubkey: authorizedVaultPda, isSigner: false, isWritable: false },
-        { pubkey: playerProfilePda,   isSigner: false, isWritable: true  },
-        { pubkey: colonyPda,          isSigner: false, isWritable: true  },
+        { pubkey: vault.publicKey,    isSigner: true,  isWritable: true  }, // vault_signer (payer)
+        { pubkey: authority,          isSigner: false, isWritable: false }, // authority
+        { pubkey: authorizedVaultPda, isSigner: false, isWritable: false }, // authorized_vault
+        { pubkey: playerProfilePda,   isSigner: false, isWritable: true  }, // player_profile
+        { pubkey: colonyPda,          isSigner: false, isWritable: true  }, // planet_state
+        { pubkey: colonyCoordsPda,    isSigner: false, isWritable: true  }, // planet_coords
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       ],
       data: encodeInstruction(IX.initializeColony, encodeColonyArgs(now, mission)),
@@ -1552,23 +2089,116 @@ if (this.preferVaultSigning && this.vaultKeypair) {
 
     await this.sendInstruction([initIx], [vault]);
 
+    // ── Step 2: resolve the colonize mission on the source planet ──────────
     reportProgress?.("Vault signing: resolving colonize mission");
 
     const resolveWriter = new BorshWriter();
     resolveWriter.writeU8(slot);
     resolveWriter.writeI64(now);
 
-    const resolveIx = this.buildVaultMutationInstruction(
-      IX.resolveColonizeVault,
-      IX.resolveColonize,
-      sourceEntityPda,
-      authority,
-      resolveWriter.toBuffer(),
-    );
+    let resolveIx: TransactionInstruction;
+
+    if (this.preferVaultSigning && this.vaultKeypair) {
+      // Vault path: resolve_colonize_vault
+      resolveIx = new TransactionInstruction({
+        programId: GAME_STATE_PROGRAM_ID,
+        keys: [
+          { pubkey: vault.publicKey,    isSigner: true,  isWritable: true  }, // vault_signer
+          { pubkey: authority,          isSigner: false, isWritable: false }, // authority
+          { pubkey: authorizedVaultPda, isSigner: false, isWritable: false }, // authorized_vault
+          { pubkey: sourceEntityPda,    isSigner: false, isWritable: true  }, // source_planet
+          { pubkey: colonyPda,          isSigner: false, isWritable: false }, // colony_planet (read)
+          { pubkey: colonyCoordsPda,    isSigner: false, isWritable: false }, // colony_coords (read)
+        ],
+        data: encodeInstruction(IX.resolveColonizeVault, resolveWriter.toBuffer()),
+      });
+    } else {
+      // Wallet fallback: resolve_colonize
+      resolveIx = new TransactionInstruction({
+        programId: GAME_STATE_PROGRAM_ID,
+        keys: [
+          { pubkey: authority,       isSigner: true,  isWritable: true  }, // authority
+          { pubkey: sourceEntityPda, isSigner: false, isWritable: true  }, // source_planet
+          { pubkey: colonyPda,       isSigner: false, isWritable: false }, // colony_planet (read)
+          { pubkey: colonyCoordsPda, isSigner: false, isWritable: false }, // colony_coords (read)
+        ],
+        data: encodeInstruction(IX.resolveColonize, resolveWriter.toBuffer()),
+      });
+    }
 
     await this.sendInstruction([resolveIx], this.vaultSigners());
 
     return { entityPda: colonyPda, planetPda: colonyPda };
+  }
+
+  /**
+   * Transfer ownership of a single planet to a new wallet.
+   *
+   * The new wallet must have already called initialize_player.
+   * After transfer, vault-signed gameplay by the new wallet works immediately.
+   * The planet PDA address does not change.
+   *
+   * This is a wallet-signed instruction — requires one wallet popup.
+   * Use this during a hack recovery: transfer all planets to a clean wallet
+   * before the attacker can do anything with them.
+   */
+  async transferPlanet(
+    planetPda: PublicKey,
+    newAuthority: PublicKey,
+  ): Promise<string> {
+    const authority = this.provider.wallet.publicKey;
+
+    // Load the planet to get its index for seed verification and get coords
+    const state = await this.loadPlanetStateByPda(planetPda);
+    if (!state) throw new Error("Planet not found.");
+    if (state.planet.owner !== authority.toBase58()) throw new Error("You do not own this planet.");
+
+    const coordsPda = derivePlanetCoordsPda(
+      state.planet.galaxy,
+      state.planet.system,
+      state.planet.position,
+    );
+
+    const newPlayerProfilePda = derivePlayerProfilePda(newAuthority);
+
+    const ix = new TransactionInstruction({
+      programId: GAME_STATE_PROGRAM_ID,
+      keys: [
+        { pubkey: authority,           isSigner: true,  isWritable: true  }, // authority (current owner, signs)
+        { pubkey: newAuthority,        isSigner: false, isWritable: false }, // new_authority
+        { pubkey: newPlayerProfilePda, isSigner: false, isWritable: false }, // new_player_profile (verified on-chain)
+        { pubkey: planetPda,           isSigner: false, isWritable: true  }, // planet_state
+        { pubkey: coordsPda,           isSigner: false, isWritable: true  }, // planet_coords
+      ],
+      data: encodeInstruction(IX.transferPlanet),
+    });
+
+    // Transfer is wallet-signed — use provider path directly
+    return this.sendInstruction([ix]);
+  }
+
+  /**
+   * Transfer ALL planets owned by this wallet to a new authority in sequence.
+   * Each transfer is a separate tx (one wallet popup each, or use wallet auto-approve).
+   *
+   * Intended for hack recovery: call this immediately to move all planets to a
+   * clean wallet before the attacker acts.
+   */
+  async transferAllPlanets(
+    newAuthority: PublicKey,
+    reportProgress?: ProgressReporter,
+  ): Promise<string[]> {
+    const planets = await this.findPlanets(this.provider.wallet.publicKey);
+    if (planets.length === 0) throw new Error("No planets to transfer.");
+
+    const sigs: string[] = [];
+    for (let i = 0; i < planets.length; i++) {
+      const p = planets[i];
+      reportProgress?.(`Transferring planet ${i + 1}/${planets.length}: ${p.planet.name}...`);
+      const sig = await this.transferPlanet(new PublicKey(p.planetPda), newAuthority);
+      sigs.push(sig);
+    }
+    return sigs;
   }
 
   async findPlayerByWallet(walletPubkey: PublicKey): Promise<{ entityPda: string } | null> {
