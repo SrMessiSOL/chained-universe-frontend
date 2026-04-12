@@ -17,6 +17,8 @@ const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ
 
 const VAULT_MIN_BALANCE_LAMPORTS = 5_000_000;
 const VAULT_TARGET_BALANCE_LAMPORTS = 20_000_000;
+const DEFAULT_TX_COMPUTE_UNITS = 250_000;
+const DEFAULT_PRIORITY_FEE_MICROLAMPORTS = 0;
 const VAULT_BACKUP_VERSION = 1;
 const VAULT_RECOVERY_MESSAGE_PREFIX = "Chained Universe vault recovery v1";
 const VAULT_CACHE_VERSION = 1;
@@ -1338,10 +1340,18 @@ export class GameClient {
     extraSigners: Keypair[] = [],
   ): Promise<string> {
     const fullInstructions = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+      ComputeBudgetProgram.setComputeUnitLimit({ units: DEFAULT_TX_COMPUTE_UNITS }),
       ...instructions,
     ];
+    if (DEFAULT_PRIORITY_FEE_MICROLAMPORTS > 0) {
+      fullInstructions.splice(
+        1,
+        0,
+        ComputeBudgetProgram.setComputeUnitPrice({
+          microLamports: DEFAULT_PRIORITY_FEE_MICROLAMPORTS,
+        }),
+      );
+    }
 
     const tx = new Transaction().add(...fullInstructions);
 
@@ -1768,11 +1778,19 @@ export class GameClient {
     return adaptPlanetState(planetPda, deserializePlanetState(Buffer.from(account.data)));
   }
 
+  async getPlanetStateByPda(planetPda: PublicKey): Promise<PlayerState | null> {
+    return this.loadPlanetStateByPda(planetPda);
+  }
+
   async findPlanets(walletPubkey: PublicKey): Promise<PlayerState[]> {
     const profile = await this.fetchPlayerProfile(walletPubkey);
     if (!profile) return [];
     const pdas = Array.from({ length: profile.planetCount }, (_, i) => derivePlanetStatePda(walletPubkey, i));
-    const states = await Promise.all(pdas.map(pda => this.loadPlanetStateByPda(pda)));
+    const accounts = await this.connection.getMultipleAccountsInfo(pdas, "confirmed");
+    const states = accounts.map((account, idx) => {
+      if (!isPlanetStateAccount(account)) return null;
+      return adaptPlanetState(pdas[idx], deserializePlanetState(Buffer.from(account.data)));
+    });
     return states
       .filter((s): s is PlayerState => !!s)
       .sort((a, b) => a.planet.planetIndex - b.planet.planetIndex);

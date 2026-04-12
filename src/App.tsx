@@ -932,11 +932,11 @@ const App: React.FC = () => {
   const clientRef = useRef<GameClient | null>(null);
   const marketClientRef = useRef<MarketClient | null>(null);
   const selectedPdaRef = useRef<string | null>(null);
-  const refreshPromiseRef = useRef<Promise<void> | null>(null);
   const vaultPromptResolverRef = useRef<{ resolve: (v: string) => void; reject: (r?: unknown) => void } | null>(null);
   const walletSessionRef = useRef(0);
 
   const state = planets.find(p => p.planetPda === selectedPlanetPda) ?? planets[0] ?? null;
+  const hasCreatedWorld = planets.length > 0;
   const isDevConfigAdmin = publicKey?.toBase58() === DEV_CONFIG_ADMIN_WALLET;
 
   useEffect(() => { const id = setInterval(() => setNowTs(Math.floor(Date.now() / 1000)), 1000); return () => clearInterval(id); }, []);
@@ -968,12 +968,8 @@ const App: React.FC = () => {
     const handleAccountChanged = (nextPublicKey?: PublicKey) => {
       syncWalletKey(nextPublicKey?.toBase58() ?? null);
     };
-    const pollWalletKey = () => {
-      syncWalletKey(wallet.adapter.publicKey?.toBase58() ?? null);
-    };
 
     handleConnect(wallet.adapter.publicKey ?? undefined);
-    const intervalId = setInterval(pollWalletKey, 500);
     wallet.adapter.on("connect", handleConnect);
     wallet.adapter.on("disconnect", handleDisconnect);
 
@@ -981,7 +977,6 @@ const App: React.FC = () => {
     rawWallet?.on?.("accountChanged", handleAccountChanged);
 
     return () => {
-      clearInterval(intervalId);
       wallet.adapter.off("connect", handleConnect);
       wallet.adapter.off("disconnect", handleDisconnect);
       rawWallet?.off?.("accountChanged", handleAccountChanged);
@@ -991,6 +986,9 @@ const App: React.FC = () => {
   useEffect(() => {
     marketClientRef.current?.setActivePlanet(state ? new PublicKey(state.planetPda) : null);
   }, [state]);
+  useEffect(() => {
+    if (!hasCreatedWorld && tab === "market") setTab("overview");
+  }, [hasCreatedWorld, tab]);
   useEffect(() => {
     clientRef.current?.setPreferVaultSigning(useVaultSigning);
   }, [useVaultSigning]);
@@ -1009,7 +1007,7 @@ const App: React.FC = () => {
     const amountSol = Number(depositAmount);
     if (!Number.isFinite(amountSol) || amountSol <= 0) { setError("Invalid deposit amount"); return; }
     setVaultActionBusy(true); setError(null);
-    try { const lamports=Math.floor(amountSol*1_000_000_000); await clientRef.current.depositToVaultLamports(lamports); await refreshVaultBalance(); setDepositAmount(""); await refresh(); }
+    try { const lamports=Math.floor(amountSol*1_000_000_000); await clientRef.current.depositToVaultLamports(lamports); await refreshVaultBalance(); setDepositAmount(""); }
     catch (e: any) { setError(e?.message ?? "Vault deposit failed"); }
     finally { setVaultActionBusy(false); }
   };
@@ -1019,7 +1017,7 @@ const App: React.FC = () => {
     const amountSol = Number(withdrawAmount);
     if (!Number.isFinite(amountSol) || amountSol <= 0) { setError("Invalid withdraw amount"); return; }
     setVaultActionBusy(true); setError(null);
-    try { const lamports=Math.floor(amountSol*1_000_000_000); await clientRef.current.withdrawVaultLamports(lamports); await refreshVaultBalance(); setWithdrawAmount(""); await refresh(); }
+    try { const lamports=Math.floor(amountSol*1_000_000_000); await clientRef.current.withdrawVaultLamports(lamports); await refreshVaultBalance(); setWithdrawAmount(""); }
     catch (e: any) { setError(e?.message ?? "Vault withdraw failed"); }
     finally { setVaultActionBusy(false); }
   };
@@ -1082,6 +1080,30 @@ const App: React.FC = () => {
     } finally { setAntimatterBalanceLoading(false); }
   }, [connection, gameConfig?.antimatterMint, publicKey]);
 
+  const replacePlanetState = useCallback((nextState: PlayerState) => {
+    setPlanets(prev => {
+      const idx = prev.findIndex(p => p.planetPda === nextState.planetPda);
+      if (idx === -1) return prev;
+      const next = [...prev];
+      next[idx] = nextState;
+      return next;
+    });
+    return nextState;
+  }, []);
+
+  const refreshPlanetState = useCallback(async (planetPda: string) => {
+    if (!clientRef.current) return null;
+    const nextState = await clientRef.current.getPlanetStateByPda(new PublicKey(planetPda));
+    if (!nextState) return null;
+    replacePlanetState(nextState);
+    return nextState;
+  }, [replacePlanetState]);
+
+  const refreshSelectedPlanetState = useCallback(async () => {
+    if (!selectedPdaRef.current) return null;
+    return refreshPlanetState(selectedPdaRef.current);
+  }, [refreshPlanetState]);
+
   // ── Main wallet connection effect ──────────────────────────────────────────
   useEffect(() => {
     if (!connected || !anchorWallet || !publicKey) {
@@ -1103,21 +1125,19 @@ const App: React.FC = () => {
     marketClientRef.current = marketClient;
 
     setLoading(true); setError(null); setVaultStatus("loading");
-    loadAllPlanets(publicKey)
-      .then(async () => {
+    Promise.all([
+      loadAllPlanets(publicKey),
+      loadGameConfig(),
+      gameClient.restoreExistingVault(),
+    ])
+      .then(async ([, config]) => {
         if (walletSessionRef.current !== sessionId || clientRef.current !== gameClient) return;
-        if (clientRef.current) {
-          await Promise.all([
-            clientRef.current.restoreExistingVault(),
-            loadGameConfig(),
-            loadAntimatterBalance(DEFAULT_ANTIMATTER_MINT),
-          ]);
-          if (walletSessionRef.current !== sessionId || clientRef.current !== gameClient) return;
-          const status = await clientRef.current.getVaultStatus();
-          if (walletSessionRef.current !== sessionId || clientRef.current !== gameClient) return;
-          setVaultStatus(status);
-          await refreshVaultBalance();
-        }
+        await loadAntimatterBalance(config?.antimatterMint ?? DEFAULT_ANTIMATTER_MINT);
+        if (walletSessionRef.current !== sessionId || clientRef.current !== gameClient) return;
+        const status = await gameClient.getVaultStatus();
+        if (walletSessionRef.current !== sessionId || clientRef.current !== gameClient) return;
+        setVaultStatus(status);
+        await refreshVaultBalance();
       })
       .catch(e => {
         if (walletSessionRef.current !== sessionId) return;
@@ -1134,28 +1154,14 @@ const App: React.FC = () => {
     };
   }, [connected, anchorWallet, publicKey, connection, loadAllPlanets, loadGameConfig, loadAntimatterBalance, requestVaultRecoveryPassphrase, refreshVaultBalance]);
 
-  const refresh = useCallback(async () => {
-    if (!publicKey || !clientRef.current) return;
-    if (refreshPromiseRef.current) return refreshPromiseRef.current;
-    const p = Promise.all([loadAllPlanets(publicKey), loadGameConfig(), loadAntimatterBalance()])
-      .then(() => { refreshPromiseRef.current = null; })
-      .catch(() => { refreshPromiseRef.current = null; });
-    refreshPromiseRef.current = p;
-    return p;
-  }, [publicKey, loadAllPlanets, loadGameConfig, loadAntimatterBalance]);
-
-  useEffect(() => { const id = setInterval(refresh, 6000); return () => clearInterval(id); }, [refresh]);
-
-  // Periodically refresh vault balance in background
-  useEffect(() => {
-    const id = setInterval(() => { void refreshVaultBalance().catch(() => {}); }, 30_000);
-    return () => clearInterval(id);
-  }, [refreshVaultBalance]);
-
-  const withTx = async (label: string, fn: () => Promise<string | void>) => {
+  const withTx = async (
+    label: string,
+    fn: () => Promise<string | void>,
+    afterTx: () => Promise<unknown> = refreshSelectedPlanetState,
+  ) => {
     if (txBusy || !clientRef.current) return;
     setTxBusy(true); setTxProgress(label); setError(null);
-    try { await fn(); await refresh(); setTimeout(() => void refresh().catch(() => {}), 1500); }
+    try { await fn(); await afterTx(); }
     catch (e: any) { setError(e?.message ?? `${label} failed`); }
     finally { setTxBusy(false); setTxProgress("Processing..."); }
   };
@@ -1163,7 +1169,13 @@ const App: React.FC = () => {
   const handleRetryVaultPassword = async () => {
     if (!clientRef.current) return;
     setVaultActionBusy(true); setError(null);
-    try { const ok=await clientRef.current.retryVaultPassword(setTxProgress); const status=await clientRef.current.getVaultStatus(); setVaultStatus(status); if(!ok)setError("Wrong password — try again or rotate the vault."); }
+    try {
+      const ok = await clientRef.current.retryVaultPassword(setTxProgress);
+      const status = await clientRef.current.getVaultStatus();
+      setVaultStatus(status);
+      if (ok) await refreshVaultBalance();
+      else setError("Wrong password — try again or rotate the vault.");
+    }
     catch (e: any) { setError(e?.message ?? "Password retry failed"); }
     finally { setVaultActionBusy(false); }
   };
@@ -1171,7 +1183,7 @@ const App: React.FC = () => {
   const handleForceRotateVault = async () => {
     if (!clientRef.current) return;
     setVaultActionBusy(true); setTxProgress("Rotating vault..."); setError(null);
-    try { await clientRef.current.forceRotateVault(setTxProgress); setVaultStatus("ready"); await refresh(); await refreshVaultBalance(); }
+    try { await clientRef.current.forceRotateVault(setTxProgress); setVaultStatus("ready"); await refreshVaultBalance(); }
     catch (e: any) { setError(e?.message ?? "Vault rotation failed"); }
     finally { setVaultActionBusy(false); setTxProgress("Processing..."); }
   };
@@ -1181,7 +1193,7 @@ const App: React.FC = () => {
     let dest: PublicKey;
     try { dest = new PublicKey(newAuthority); } catch { setError("Invalid destination wallet address."); return; }
     setTxBusy(true); setTxProgress("Transferring planets..."); setError(null);
-    try { await clientRef.current.transferAllPlanets(dest, setTxProgress); await refresh(); }
+    try { await clientRef.current.transferAllPlanets(dest, setTxProgress); if (publicKey) await loadAllPlanets(publicKey); }
     catch (e: any) { setError(e?.message ?? "Transfer failed"); }
     finally { setTxBusy(false); setTxProgress("Processing..."); }
   };
@@ -1191,14 +1203,19 @@ const App: React.FC = () => {
     let mint: PublicKey;
     try { mint = new PublicKey(gameConfigMintInput); } catch { setError("Invalid ANTIMATTER mint address."); return; }
     setGameConfigBusy(true); setTxProgress(gameConfig ? "Updating game config..." : "Initializing game config..."); setError(null);
-    try { if(gameConfig)await clientRef.current.updateAntimatterMint(mint); else await clientRef.current.initializeGameConfig(mint); await refresh(); }
+    try {
+      if (gameConfig) await clientRef.current.updateAntimatterMint(mint);
+      else await clientRef.current.initializeGameConfig(mint);
+      await loadGameConfig();
+      await loadAntimatterBalance(mint.toBase58());
+    }
     catch (e: any) { setError(e?.message ?? "Game config transaction failed"); }
     finally { setGameConfigBusy(false); setTxProgress("Processing..."); }
   };
 
-  const handleInstantFinishBuild = async () => { if (!clientRef.current || !state) return; await withTx("Instant finish build", () => clientRef.current!.accelerateBuildWithAntimatter(new PublicKey(state.entityPda))); };
-  const handleInstantFinishResearch = async () => { if (!clientRef.current || !state) return; await withTx("Instant finish research", () => clientRef.current!.accelerateResearchWithAntimatter(new PublicKey(state.entityPda))); };
-  const handleInstantFinishShipyard = async () => { if (!clientRef.current || !state) return; await withTx("Instant finish shipyard", () => clientRef.current!.accelerateShipBuildWithAntimatter(new PublicKey(state.entityPda))); };
+  const handleInstantFinishBuild = async () => { if (!clientRef.current || !state) return; await withTx("Instant finish build", () => clientRef.current!.accelerateBuildWithAntimatter(new PublicKey(state.entityPda)), async () => { await refreshSelectedPlanetState(); await loadAntimatterBalance(); }); };
+  const handleInstantFinishResearch = async () => { if (!clientRef.current || !state) return; await withTx("Instant finish research", () => clientRef.current!.accelerateResearchWithAntimatter(new PublicKey(state.entityPda)), async () => { await refreshSelectedPlanetState(); await loadAntimatterBalance(); }); };
+  const handleInstantFinishShipyard = async () => { if (!clientRef.current || !state) return; await withTx("Instant finish shipyard", () => clientRef.current!.accelerateShipBuildWithAntimatter(new PublicKey(state.entityPda)), async () => { await refreshSelectedPlanetState(); await loadAntimatterBalance(); }); };
 
   useEffect(() => { if (!publicKey) return; void loadAntimatterBalance().catch(() => setAntimatterBalance(0n)); }, [publicKey, gameConfig?.antimatterMint, loadAntimatterBalance]);
 
@@ -1246,6 +1263,11 @@ const App: React.FC = () => {
   const vaultReady = clientRef.current?.isVaultReady() ?? false;
   const antimatterBalanceLabel = formatTokenAmount(antimatterBalance, DEFAULT_ANTIMATTER_DECIMALS);
   const antimatterEnabled = !!gameConfig;
+  const visibleSecondaryTabs = hasCreatedWorld
+    ? SECONDARY_TABS
+    : SECONDARY_TABS.filter(t => t.id !== "market");
+  const visibleDesktopTabs: Tab[] = ["overview","resources","buildings","research","shipyard","fleet","missions","galaxy","market"]
+    .filter(t => hasCreatedWorld || t !== "market") as Tab[];
 
   // ── Market tx callbacks ───────────────────────────────────────────────────
   const handleMarketTxStart = useCallback((label: string) => {
@@ -1255,8 +1277,8 @@ const App: React.FC = () => {
   const handleMarketTxEnd = useCallback((err?: string) => {
     setTxBusy(false); setTxProgress("Processing...");
     if (err) setError(err);
-    else void refresh().catch(() => {});
-  }, [refresh]);
+    else void Promise.all([refreshSelectedPlanetState(), loadAntimatterBalance()]).catch(() => {});
+  }, [refreshSelectedPlanetState, loadAntimatterBalance]);
 
   // ── Galaxy launch callbacks ───────────────────────────────────────────────
   const handleGalaxyLaunchTransport = useCallback((galaxy: number, system: number, position: number) => {
@@ -1391,7 +1413,7 @@ const App: React.FC = () => {
                 </div>
               )}
               <nav className="nav">
-                {ALL_DESKTOP_TABS.map(t => (
+                {visibleDesktopTabs.map(t => (
                   <div key={t} className={`nav-item${tab===t?" active":""}`} onClick={() => setTab(t)}>
                     {DESKTOP_TAB_ICONS[t]} {t.charAt(0).toUpperCase()+t.slice(1)}
                     {t==="missions"&&activeMissionCount>0&&<span className="nav-badge">{activeMissionCount}</span>}
@@ -1407,11 +1429,7 @@ const App: React.FC = () => {
                 </>)}
               </nav>
             </>) : (
-              <nav className="nav">
-                <div className={`nav-item${tab==="market"?" active":""}`} onClick={() => setTab("market")}>
-                  ⚖ Market
-                </div>
-              </nav>
+              <nav className="nav" />
             )}
           </aside>
           <main className="main" style={{position:"relative",zIndex:1}}>
@@ -1452,7 +1470,7 @@ const App: React.FC = () => {
               <div style={{position:"fixed",inset:0,zIndex:44,background:"rgba(0,0,0,0.4)"}} onClick={() => setShowMoreDrawer(false)}/>
               <div className="mobile-more-drawer">
                 <div className="mobile-more-grid">
-                  {SECONDARY_TABS.map(t => (
+                  {visibleSecondaryTabs.map(t => (
                     <div key={t.id} className={`mobile-more-item${tab===t.id?" active":""}`} onClick={() => handleMobileTabClick(t.id)}>
                       <span className="mobile-more-icon">{t.icon}</span>
                       <span className={`mobile-more-label${tab===t.id?" active":""}`}>{t.label}</span>
@@ -1477,7 +1495,7 @@ const App: React.FC = () => {
                 <span className="mobile-nav-label">{t.label}</span>
               </button>
             ))}
-            <button className={`mobile-nav-btn${SECONDARY_TABS.some(t=>t.id===tab)||showMoreDrawer?" active":""}`} onClick={() => setShowMoreDrawer(v => !v)}>
+            <button className={`mobile-nav-btn${visibleSecondaryTabs.some(t=>t.id===tab)||showMoreDrawer?" active":""}`} onClick={() => setShowMoreDrawer(v => !v)}>
               <span className="mobile-nav-icon">···</span>
               <span className="mobile-nav-label">More</span>
             </button>

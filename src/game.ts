@@ -181,6 +181,17 @@ export type ProgressReporter = (message: string) => void;
 const TRANSPORT_MISSION = 2;
 const COLONIZE_MISSION = 5;
 const ER_AUTO_COMMIT_FREQUENCY_MS = 1_000;
+const PRIORITY_FEE_MICROLAMPORTS = 0;
+const SESSION_BURNER_FUNDING_LAMPORTS = 1_000_000;
+const TX_COMPUTE_UNITS = {
+  initBatch: 900_000,
+  systemInit: 300_000,
+  delegateBatch: 1_000_000,
+  delegateSinglePlanet: 500_000,
+  commit: 250_000,
+  systemHeavy: 350_000,
+  systemStandard: 250_000,
+} as const;
 const COMMIT_SIGNATURE_POLL_ATTEMPTS = 8;
 const COMMIT_SIGNATURE_POLL_DELAY_MS = 1_500;
 const COMMIT_STATE_COMPARE_ATTEMPTS = 6;
@@ -304,6 +315,16 @@ function ixDiscriminator(name: string): Buffer {
   return Buffer.from(bytes);
 }
 
+function computeBudgetIxs(units: number): TransactionInstruction[] {
+  const instructions = [ComputeBudgetProgram.setComputeUnitLimit({ units })];
+  if (PRIORITY_FEE_MICROLAMPORTS > 0) {
+    instructions.push(
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: PRIORITY_FEE_MICROLAMPORTS }),
+    );
+  }
+  return instructions;
+}
+
 // ─── Game client ──────────────────────────────────────────────────────────────
 export class GameClient {
   private connection:   Connection;
@@ -383,7 +404,7 @@ export class GameClient {
       SystemProgram.transfer({
         fromPubkey: payer,
         toPubkey: burner.publicKey,
-        lamports: 10_000_000,
+        lamports: SESSION_BURNER_FUNDING_LAMPORTS,
       })
     );
     const fundSig = await this.provider.sendAndConfirm(fundTx, []);
@@ -757,8 +778,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
   });
 
   const bigInitTx = new Transaction().add(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 }), // high limit for all inits
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+    ...computeBudgetIxs(TX_COMPUTE_UNITS.initBatch),
     ...addEntityResult.transaction.instructions,
   );
 
@@ -814,8 +834,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
 
   reportProgress?.("Initializing components");
   const systemTx = new Transaction().add(
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 500_000 }),
-    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+    ...computeBudgetIxs(TX_COMPUTE_UNITS.systemInit),
     patchedIx
   );
 
@@ -1128,8 +1147,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
     const colonyEntityPda = addEntityResult.entityPda;
 
     const initTx = new Transaction().add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_200_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+      ...computeBudgetIxs(TX_COMPUTE_UNITS.initBatch),
       ...addEntityResult.transaction.instructions,
     );
 
@@ -1260,7 +1278,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       SystemProgram.transfer({
         fromPubkey: payer,
         toPubkey:   burner.publicKey,
-        lamports:   10_000_000,
+        lamports:   SESSION_BURNER_FUNDING_LAMPORTS,
       })
     );
     const fundSig = await this.provider.sendAndConfirm(fundTx, []);
@@ -1281,10 +1299,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       buildDelegateIx(target.entityPda, PROGRAM_IDS.componentResearch, target.researchPda),
     ]));
 
-    const delegatePrefixIxs = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
-    ];
+    const delegatePrefixIxs = computeBudgetIxs(TX_COMPUTE_UNITS.delegateBatch);
     let delegateBatches: TransactionInstruction[][];
     try {
       const singleTx = new Transaction();
@@ -1312,8 +1327,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
         reportProgress?.(`Signing with wallet: delegating session batch ${batchIndex + 1} of ${delegateBatches.length}`);
       }
       const delegateTx = new Transaction().add(
-        ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
-        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
+        ...computeBudgetIxs(TX_COMPUTE_UNITS.delegateBatch),
         ...delegateBatches[batchIndex],
       );
       const delegateSig = await this.provider.sendAndConfirm(delegateTx, []);
@@ -1640,8 +1654,7 @@ async initializePlanet(planetName = "Homeworld", reportProgress?: ProgressReport
       `Delegating ${componentProgramIds.length} component accounts for ${entityPda.toBase58()} with auto-commit every ${ER_AUTO_COMMIT_FREQUENCY_MS}ms.`,
     );
     const delegateTx = new Transaction().add(
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 50_000 }),
+      ...computeBudgetIxs(TX_COMPUTE_UNITS.delegateSinglePlanet),
     );
 
     for (const componentProgramId of componentProgramIds) {
@@ -1798,8 +1811,7 @@ private async commitSelected(
   const sig = await this.sendErTransaction(
     `commit_${label}`,
     [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+      ...computeBudgetIxs(TX_COMPUTE_UNITS.commit),
       commitIx,
     ],
   );
@@ -2072,8 +2084,7 @@ private async commitSelected(
         const sendWithFreshBlockhash = async (): Promise<string> => {
           const { blockhash, lastValidBlockHeight } = await erConn.getLatestBlockhash("confirmed");
           const tx = new Transaction().add(
-            ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
-            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+            ...computeBudgetIxs(TX_COMPUTE_UNITS.systemHeavy),
             patchedIx,
           );
           tx.recentBlockhash = blockhash;
@@ -2120,8 +2131,7 @@ private async commitSelected(
         });
         this.logInstructionKeys(label, applyTx.instructions[0]);
         const tx = new Transaction().add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 600_000 }),
-          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+          ...computeBudgetIxs(TX_COMPUTE_UNITS.systemHeavy),
           patchApplyArgs(applyTx.instructions[0], rawArgs),
         );
         sig = await this.provider.sendAndConfirm(tx, [], { commitment: "confirmed" });
@@ -2175,8 +2185,7 @@ private async commitSelected(
         const sendWithFreshBlockhash = async (): Promise<string> => {
           const { blockhash, lastValidBlockHeight } = await erConn.getLatestBlockhash("confirmed");
           const tx = new Transaction().add(
-            ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+            ...computeBudgetIxs(TX_COMPUTE_UNITS.systemStandard),
             patchedIx,
           );
           tx.recentBlockhash = blockhash;
@@ -2224,8 +2233,7 @@ private async commitSelected(
           args:      [],
         });
         const tx = new Transaction().add(
-          ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-          ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
+          ...computeBudgetIxs(TX_COMPUTE_UNITS.systemStandard),
           patchApplyArgs(applyTx.instructions[0], rawArgs),
         );
         sig = await this.provider.sendAndConfirm(tx, [], { commitment: "confirmed" });

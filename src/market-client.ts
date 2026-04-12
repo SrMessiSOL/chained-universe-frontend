@@ -28,6 +28,8 @@ export const GAME_STATE_PROGRAM_ID = new PublicKey(
 );
 export const ANTIMATTER_SCALE = 1_000_000n;
 export const MIN_RESOURCE_AMOUNT = 1_000n;
+const MARKET_TX_COMPUTE_UNITS = 250_000;
+const MARKET_PRIORITY_FEE_MICROLAMPORTS = 0;
 
 const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
@@ -281,11 +283,13 @@ export class MarketClient {
     instructions: TransactionInstruction[],
     extraSigners: Keypair[] = [],
   ): Promise<string> {
-    const fullIxs = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
-      ...instructions,
-    ];
+    const fullIxs = [ComputeBudgetProgram.setComputeUnitLimit({ units: MARKET_TX_COMPUTE_UNITS })];
+    if (MARKET_PRIORITY_FEE_MICROLAMPORTS > 0) {
+      fullIxs.push(
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: MARKET_PRIORITY_FEE_MICROLAMPORTS }),
+      );
+    }
+    fullIxs.push(...instructions);
     const tx = new Transaction().add(...fullIxs);
     const { blockhash, lastValidBlockHeight } =
       await this.connection.getLatestBlockhash("confirmed");

@@ -1,107 +1,152 @@
 # ER Cross-Device Architecture
 
-This repo now supports the old same-browser delegated-session behavior again:
+This document describes the current state of delegated gameplay, burner persistence, and vault recovery in the frontend.
 
-- delegated planets are detected from chain state
-- the ER burner signer is restored from `sessionStorage`
-- if the burner is missing, gameplay can still route to ER, but wallet signatures are required
+## Current Model
 
-## Current Auto-Commit Behavior
+The current frontend combines three pieces:
+- a connected wallet for identity, first-time setup, and recovery-required actions
+- an ephemeral rollup burner signer for delegated gameplay paths
+- a vault flow with encrypted recovery for routine gameplay signing in the app UI
 
-In this repo, the `commitFrequencyMs` argument passed to `createDelegateInstruction(...)` is real for the installed `@magicblock-labs/bolt-sdk` version.
+These pieces solve different problems and should not be treated as interchangeable.
 
-Current value in the client:
+## What Exists Today
 
+### 1. Browser-stored ER burner recovery
+
+The ER burner is still restored from browser storage in the current client.
+
+Current behavior in `src/game.ts`:
+- the client first looks for `_er_burner` in `sessionStorage`
+- it also migrates an older `localStorage` value into `sessionStorage` if needed
+- if a stored burner is found, delegated gameplay can resume without creating a fresh burner immediately
+- if no stored burner is found, delegated planets can still be detected on-chain, but the app falls back to wallet-signed or newly funded delegation flows until a new burner is created
+
+What this means in practice:
+- same-browser continuity works
+- true cross-device burner restoration does not exist yet
+- browser storage is convenience, not durable cross-device recovery
+
+### 2. On-chain vault recovery flow
+
+The UI now includes a stronger recovery model around the gameplay vault.
+
+Current visible behavior in `src/App.tsx`:
+- users can create a recovery password for the encrypted vault backup
+- the app can report `wrong_password` and `backup_missing` states
+- users can retry the password flow
+- users can rotate to a fresh vault if recovery is no longer possible
+- users can transfer all planets to a clean wallet from the vault manager
+
+What this solves:
+- recovery of the vault-backed gameplay path is no longer just a browser-session concern
+- the app has a user-facing recovery story beyond raw burner persistence
+
+What it does not solve by itself:
+- automatic cross-device restoration of the ER burner signer
+- a backend-managed, always-available signer model
+
+### 3. Delegated gameplay through MagicBlock
+
+The frontend still supports delegated account flows through MagicBlock.
+
+Current behavior:
+- delegated targets are discovered from on-chain state
+- the client can create and fund a burner wallet when needed
+- component delegation may be batched across multiple transactions
+- undelegation also supports retries and batching
+- the client polls for scheduled commit markers and compares state when needed
+
+The current auto-commit setting in `src/game.ts` is:
 - `ER_AUTO_COMMIT_FREQUENCY_MS = 1000`
 
-What the frontend can honestly say today:
+That means the client is configured for scheduled commits, but it is still not identical to an explicit force-commit-after-every-action architecture.
 
-- delegated accounts are configured with a non-zero commit frequency
-- the client polls ER logs looking for MagicBlock scheduled-commit markers after gameplay actions
-- if those markers are found, the client can report an observed scheduled commit
+## Why Registry Data Is Not Enough
 
-Important nuance:
-
-- this is still not the same as explicitly forcing a base-layer commit after each individual action
-- if the client cannot find the expected ER log markers, it cannot prove that auto-commit happened
-- true deterministic "save now" behavior would still need a dedicated commit-with-handler / commit-without-undelegate flow on the program side
-
-That solves same-browser refreshes, but it does **not** solve true cross-device persistence of the ER signer.
-
-## Why Registry Is Not Enough
-
-`system-registry` is the right source for:
-
-- wallet -> owned planets
+`system-registry` is the right source for public ownership and coordinate metadata such as:
+- wallet to owned planets
 - entity PDA
 - planet PDA
 - coordinates
 - planet index
 
-It is **not** enough to restore a delegated signer because it only stores public on-chain metadata. The ER signer requires private signing material.
+It is not enough to restore private signing material. Neither the burner signer nor the vault secret can be reconstructed from registry metadata alone.
 
-## Cross-Device Options
+## Current Recovery Story
 
-### 1. Wallet Rebind
+Today the practical recovery story looks like this:
+
+1. Same browser or same session
+- restore the ER burner from browser storage when available
+- continue delegated gameplay without forcing a new burner immediately
+
+2. New browser or new device
+- the burner is usually not available
+- the app can still detect owned or delegated planets from chain state
+- wallet approval is required to re-establish the delegated path or rotate to a new usable signing setup
+
+3. Vault issues
+- if the encrypted backup exists but password entry fails, prompt for retry
+- if no usable backup exists, rotate to a new vault and re-establish trusted gameplay signing
+- if compromise is suspected, transfer all planets to a clean wallet
+
+## Cross-Device Options Going Forward
+
+### Option 1: Wallet rebind only
 
 Flow:
-
-- load planets from `system-registry`
-- detect delegated planets from chain owner
-- if this browser does not have the burner, ask the wallet to rebind delegation
-- create a fresh burner for this browser/session
-- continue gameplay on ER
+- load owned planets from registry
+- detect whether delegated state exists
+- if no local burner is available, ask the wallet to create and fund a new burner for this browser
+- continue gameplay with the new delegated path
 
 Pros:
-
 - fully client-side
 - no custodial backend
-- simplest secure upgrade path
+- easiest path from the current codebase
 
 Cons:
+- still requires wallet interaction on new devices
+- burner continuity is not portable by itself
 
-- at least one wallet popup when switching browser/device
-
-### 2. Backend-Managed ER Signer
+### Option 2: Backend-managed signer
 
 Flow:
-
-- user authenticates with wallet
-- backend stores or derives the ER signer for the account/session
-- frontend sends gameplay actions to backend
-- backend signs ER transactions
-- backend can optionally commit state to base layer on a schedule or after each action
+- authenticate the user with wallet ownership
+- backend manages or derives the gameplay signer
+- frontend sends gameplay intents to the backend
+- backend signs delegated actions and can coordinate commit behavior
 
 Pros:
-
-- true web2-feeling experience
-- works across devices
-- no wallet popups for routine gameplay
+- best cross-device UX
+- fewer wallet prompts for routine play
+- easier centralized monitoring and recovery tooling
 
 Cons:
-
 - custodial or semi-custodial trust model
-- needs backend security, auth, and rate limiting
+- backend auth, rate limiting, and key management become critical
 
-### 3. Commit-Without-Undelegate
+### Option 3: Commit-without-undelegate plus managed signing
 
-If MagicBlock `commit_accounts` is adopted on the program side, the best UX target becomes:
-
+If the program side adopts a reliable commit-without-undelegate flow, the best long-term UX becomes:
 - keep planets delegated
-- play on ER
-- commit state to base layer without undelegating
-- optionally do this after each important action
-
-That still does not restore a private signer across devices by itself, but it pairs well with the backend-managed signer model.
+- use a stable signer model
+- commit state when needed without tearing down delegation every time
+- pair that with either wallet rebind or backend-managed signing depending on trust requirements
 
 ## Recommended Path
 
 Short term:
+- keep the current browser-stored burner recovery
+- keep the current on-chain vault recovery UX
+- add any missing wallet rebind UX for cases where delegated state exists but no local burner is recoverable
 
-- keep same-browser recovery with `sessionStorage`
-- add wallet rebind flow when a delegated planet is found but no burner is present
+Medium term:
+- make the cross-device rebind flow explicit in the UI so users understand why a wallet signature is required
+- keep vault rotation and transfer-to-clean-wallet flows as the operational safety path
 
 Long term:
-
-- move to backend-managed ER signing if the goal is truly seamless cross-device play
-- combine that with commit-without-undelegate on the program side
+- move to backend-managed signing if the product goal is truly seamless cross-device gameplay with minimal wallet friction
+- pair that with a deterministic commit strategy on the program side
