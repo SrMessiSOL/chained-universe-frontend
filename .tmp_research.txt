@@ -1,0 +1,102 @@
+const ResearchTab: React.FC<{ research: Research; res?: Resources; planet: Planet; txBusy: boolean; antimatterBalance: bigint; antimatterEnabled: boolean; onResearch: (idx: number) => void; onFinishResearch: () => void; onInstantFinishResearch: () => void; onGoBuildings: () => void; onGoResearch: () => void; }> =
+  ({ research, res, planet, txBusy, antimatterBalance, antimatterEnabled, onResearch, onFinishResearch, onInstantFinishResearch, onGoBuildings, onGoResearch }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const isResearching = research.queueItem !== 255;
+    const researchSecsLeft = isResearching ? Math.max(0, research.researchFinishTs - now) : 0;
+    const baseCostsArr = [[0, 800, 400], [400, 0, 600], [2000, 4000, 600], [10000, 20000, 6000], [0, 400, 600], [4000, 2000, 1000], [240000, 400000, 160000]];
+    const [reqCheck, setReqCheck] = useState<RequirementCheck | null>(null);
+
+    return (
+      <>
+        <div className="command-tab-shell">
+          <div className="command-section-head">
+            <div className="command-eyebrow">Science Directorate</div>
+            <div className="command-head-title">Research Lab</div>
+            <div className="command-copy">Advance propulsion, economy, and expansion tech from a single command queue. Every upgrade compounds the pace of your empire.</div>
+          </div>
+          <div>
+            <div className="section-title">?? RESEARCH LAB</div>
+            {isResearching && (
+              <div className="build-queue-banner" style={{ marginBottom: 20 }}>
+                <div>
+                  <div className="build-queue-label">CURRENT RESEARCH</div>
+                  <div className="build-queue-item-name">{RESEARCH_TECHS.find(t => t.idx === research.queueItem)?.name || "Unknown"}</div>
+                </div>
+                <div className="build-queue-right" style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+                  <div className="build-queue-eta">{fmtCountdown(researchSecsLeft)}</div>
+                  <button className="build-btn finish-btn" disabled={txBusy || researchSecsLeft > 0} onClick={onFinishResearch}>
+                    {researchSecsLeft > 0 ? "IN PROGRESS" : "FINISH RESEARCH"}
+                  </button>
+                  <InstantFinishButton secondsLeft={researchSecsLeft} balance={antimatterBalance} enabled={antimatterEnabled} txBusy={txBusy} onClick={onInstantFinishResearch} />
+                </div>
+              </div>
+            )}
+            <div className="grid-3">
+              {RESEARCH_TECHS.map(tech => {
+                const level = ((research as any)[tech.field] as number) ?? 0;
+                const costs = baseCostsArr[tech.idx];
+                const cm = Math.floor(costs[0] * Math.pow(2, level));
+                const cc = Math.floor(costs[1] * Math.pow(2, level));
+                const cd = Math.floor(costs[2] * Math.pow(2, level));
+                const canAfford = !res || (res.metal >= BigInt(cm) && res.crystal >= BigInt(cc) && res.deuterium >= BigInt(cd));
+                const requirementCheck = checkResearchRequirements(tech, planet, research);
+                const requirementsMet = requirementCheck.allMet;
+                const isThis = isResearching && research.queueItem === tech.idx;
+                const missingCount = requirementCheck.requirements.filter(requirement => !requirement.met).length;
+                let btnClass = "build-btn no-funds";
+                let btnText = "INSUFFICIENT FUNDS";
+                if (isResearching) {
+                  btnClass = isThis ? "build-btn building-now" : "build-btn no-funds";
+                  btnText = isThis ? fmtCountdown(researchSecsLeft) : "QUEUE FULL";
+                } else if (!requirementsMet) {
+                  btnClass = "build-btn locked-btn";
+                  btnText = REQUIREMENTS ();
+                } else if (canAfford) {
+                  btnClass = "build-btn can-build";
+                  btnText = RESEARCH ? Lv ;
+                }
+
+                return (
+                  <div key={tech.idx} className="building-card" style={{ borderColor: !requirementsMet ? "rgba(255,0,110,0.2)" : undefined }}>
+                    <div className="building-header">
+                      <div className="building-icon-name">
+                        <span className="building-icon">{tech.icon}</span>
+                        <span className="building-name">{tech.name}</span>
+                      </div>
+                      <span className="building-level">Lv {level}</span>
+                    </div>
+                    {!requirementsMet && (
+                      <div style={{ fontSize: 9, color: "var(--danger)", letterSpacing: 0.5, display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--danger)", display: "inline-block" }} />
+                        locked {missingCount > 0 ? ·  missing : ""}
+                      </div>
+                    )}
+                    <div className="building-costs">
+                      {cm > 0 && <div className="building-cost-row"><span>Metal</span><span className={res && res.metal < BigInt(cm) ? "cost-bad" : "cost-ok"}>{fmt(cm)}</span></div>}
+                      {cc > 0 && <div className="building-cost-row"><span>Crystal</span><span className={res && res.crystal < BigInt(cc) ? "cost-bad" : "cost-ok"}>{fmt(cc)}</span></div>}
+                      {cd > 0 && <div className="building-cost-row"><span>Deuterium</span><span className={res && res.deuterium < BigInt(cd) ? "cost-bad" : "cost-ok"}>{fmt(cd)}</span></div>}
+                    </div>
+                    <button
+                      className={btnClass}
+                      disabled={txBusy || (isResearching && !isThis) || (!requirementsMet ? false : !canAfford)}
+                      onClick={() => {
+                        if (isResearching) return;
+                        if (!requirementsMet) {
+                          setReqCheck(requirementCheck);
+                          return;
+                        }
+                        onResearch(tech.idx);
+                      }}
+                    >
+                      {btnText}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+        <RequirementsModal check={reqCheck} onClose={() => setReqCheck(null)} onGoBuildings={onGoBuildings} onGoResearch={onGoResearch} />
+      </>
+    );
+  };

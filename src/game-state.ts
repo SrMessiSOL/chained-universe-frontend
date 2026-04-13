@@ -44,7 +44,6 @@ const IX = {
   rotateVault:            Buffer.from([192, 205, 175, 133, 189, 211, 141, 109]),
   revokeVault:            Buffer.from([199, 172, 226, 172, 196, 244, 179, 103]),
   extendVault:            Buffer.from([176, 167, 130, 249, 196, 63, 158, 200]),
-
   initializeHomeworld:    Buffer.from([124, 7, 81, 167, 80, 191, 227, 173]),
   initializeColony:       Buffer.from([91, 184, 105, 243, 90, 175, 137, 217]),
 
@@ -74,6 +73,8 @@ const IX = {
 
   resolveTransport:       Buffer.from([123, 85, 232, 96, 135, 53, 52, 32]),
   resolveTransportVault:  Buffer.from([168, 164, 6, 82, 122, 24, 118, 35]),
+  resolveTransportEmpty:  Buffer.from([11, 148, 12, 64, 192, 185, 94, 126]),
+  resolveTransportEmptyVault: Buffer.from([122, 88, 238, 190, 70, 125, 222, 175]),
 
   resolveColonize:        Buffer.from([229, 191, 212, 205, 242, 178, 50, 79]),
   resolveColonizeVault:   Buffer.from([144, 28, 197, 235, 65, 250, 241, 88]),
@@ -585,6 +586,7 @@ function deriveGameConfigPda(): PublicKey {
   )[0];
 }
 
+
 // ─── Coord slot helpers ───────────────────────────────────────────────────────
 
 /**
@@ -826,6 +828,7 @@ function deserializeGameConfig(data: Buffer): GameConfigAccount {
   const bump = readU8(data, o);
   return { admin, antimatterMint, bump };
 }
+
 
 // ─── Adapters ─────────────────────────────────────────────────────────────────
 function adaptPlanetState(planetPda: PublicKey, account: PlanetStateAccount): PlayerState {
@@ -1258,6 +1261,7 @@ export class GameClient {
     }
   }
 
+
   private async findUserTokenAccountForMint(owner: PublicKey, mint: PublicKey): Promise<PublicKey> {
     const response = await this.connection.getParsedTokenAccountsByOwner(
       owner,
@@ -1431,6 +1435,10 @@ export class GameClient {
 
     await this.sendInstruction([ix]);
   }
+
+
+
+
 
   async rotateVault(reportProgress?: ProgressReporter): Promise<void> {
     const authority = this.provider.wallet.publicKey;
@@ -1886,6 +1894,7 @@ export class GameClient {
     });
   }
 
+
   // ── Gameplay actions ─────────────────────────────────────────────────────────
   async startBuild(entityPda: PublicKey, buildingIdx: number): Promise<string> {
     await this.ensureVault();
@@ -2030,14 +2039,25 @@ export class GameClient {
     const destinationPlanetPda = await this.findPlanetByCoordinates(
       mission.targetGalaxy, mission.targetSystem, mission.targetPosition,
     );
-    if (!destinationPlanetPda) {
-      throw new Error(`No destination planet found at ${mission.targetGalaxy}:${mission.targetSystem}:${mission.targetPosition}.`);
-    }
     const state = await this.loadPlanetStateByPda(sourceEntityPda);
     const authority = state ? new PublicKey(state.planet.owner) : this.provider.wallet.publicKey;
     const writer = new BorshWriter();
     writer.writeU8(slot);
     writer.writeI64(Math.floor(Date.now() / 1000));
+
+    if (!destinationPlanetPda) {
+      return this.sendInstruction(
+        [this.buildVaultMutationInstruction(
+          IX.resolveTransportEmptyVault,
+          IX.resolveTransportEmpty,
+          sourceEntityPda,
+          authority,
+          writer.toBuffer(),
+        )],
+        this.vaultSigners(),
+      );
+    }
+
     return this.sendInstruction(
       [this.buildVaultTransportInstruction(sourceEntityPda, destinationPlanetPda, authority, writer.toBuffer())],
       this.vaultSigners(),
@@ -2323,3 +2343,4 @@ export function energyEfficiency(res: Resources): number {
   if (res.energyConsumption === 0n) return 100;
   return Math.min(100, Number((res.energyProduction * 100n) / res.energyConsumption));
 }
+
