@@ -110,6 +110,10 @@ const GalaxyTab: React.FC<GalaxyTabProps> = ({
             <div key={slot}>
               <div
                 onClick={() => setActionSlot(prev => prev === slot ? null : slot)}
+                tabIndex={0}
+                role="button"
+                data-psg1-focusable="true"
+                aria-expanded={isOpen}
                 style={{
                   display: "flex", alignItems: "center", gap: 12, padding: "9px 14px",
                   background: isOpen ? (hasPlanet ? "rgba(0,245,212,0.04)" : "rgba(155,93,229,0.04)") : "var(--panel)",

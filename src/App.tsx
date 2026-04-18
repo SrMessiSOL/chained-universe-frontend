@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useConnection, useWallet, useAnchorWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { AnchorProvider } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 import {
@@ -18,6 +17,9 @@ import { MarketClient } from "./market-client";
 import { BUILDING_REQUIREMENTS, RESEARCH_REQUIREMENTS, type Requirement } from "./combat-engine";
 import { getPlanetTheme } from "./art-direction";
 import { getPlanetIdentity } from "./planet-generation";
+import { resolveGameArt } from "./ui-art";
+import { usePsg1Controls } from "./usePsg1Controls";
+import WalletConnectControl from "./WalletConnectControl";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Tab = "overview" | "resources" | "buildings" | "shipyard" | "fleet" | "missions" | "research" | "galaxy" | "market";
@@ -153,6 +155,204 @@ function buildRequirementCheck(
   };
 }
 
+function svgToDataUri(svg: string): string {
+  return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
+}
+
+function buildCardArt(accentA: string, accentB: string, accentC: string, motif: string): string {
+  return svgToDataUri(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160" fill="none">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="${accentA}" stop-opacity="0.95"/>
+          <stop offset="55%" stop-color="${accentB}" stop-opacity="0.82"/>
+          <stop offset="100%" stop-color="#050816" stop-opacity="1"/>
+        </linearGradient>
+        <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(240 30) rotate(140) scale(120 90)">
+          <stop offset="0%" stop-color="${accentC}" stop-opacity="0.72"/>
+          <stop offset="100%" stop-color="${accentC}" stop-opacity="0"/>
+        </radialGradient>
+      </defs>
+      <rect width="320" height="160" rx="24" fill="url(#bg)"/>
+      <rect width="320" height="160" rx="24" fill="url(#glow)"/>
+      <g opacity="0.15" stroke="white">
+        <path d="M24 120H296" />
+        <path d="M40 98H280" />
+        <path d="M64 76H256" />
+      </g>
+      ${motif}
+    </svg>
+  `);
+}
+
+const BUILDING_ART: Record<string, string> = {
+  metalMine: buildCardArt(
+    "#61411d",
+    "#a96f2b",
+    "#ffd58b",
+    `<g>
+      <path d="M26 118L78 64L120 118Z" fill="#25140a" fill-opacity="0.95"/>
+      <path d="M98 118L154 50L208 118Z" fill="#3a210f" fill-opacity="0.92"/>
+      <path d="M210 118L254 72L292 118Z" fill="#5b3417" fill-opacity="0.9"/>
+      <rect x="135" y="54" width="18" height="56" rx="3" fill="#ffcf7a"/>
+      <rect x="132" y="62" width="24" height="8" rx="3" fill="#fff2cc" fill-opacity="0.7"/>
+    </g>`
+  ),
+  crystalMine: buildCardArt(
+    "#0d324d",
+    "#146c94",
+    "#7af0ff",
+    `<g>
+      <path d="M78 118L114 46L146 118Z" fill="#9ff6ff" fill-opacity="0.85"/>
+      <path d="M128 118L162 26L198 118Z" fill="#d6feff" fill-opacity="0.95"/>
+      <path d="M184 118L222 56L256 118Z" fill="#7de6f7" fill-opacity="0.82"/>
+      <path d="M162 26L144 76L162 118L180 76Z" fill="#ffffff" fill-opacity="0.48"/>
+    </g>`
+  ),
+  deuteriumSynthesizer: buildCardArt(
+    "#14324c",
+    "#195d7f",
+    "#4cc9f0",
+    `<g>
+      <rect x="46" y="64" width="64" height="54" rx="10" fill="#0e1f34" fill-opacity="0.95"/>
+      <rect x="120" y="46" width="82" height="72" rx="12" fill="#143451" fill-opacity="0.92"/>
+      <rect x="214" y="58" width="54" height="60" rx="10" fill="#1d4d6f" fill-opacity="0.92"/>
+      <circle cx="160" cy="82" r="18" fill="#71dbff" fill-opacity="0.88"/>
+      <path d="M160 62C149 75 146 83 146 89C146 97 152 103 160 103C168 103 174 97 174 89C174 83 171 75 160 62Z" fill="#ffffff" fill-opacity="0.72"/>
+    </g>`
+  ),
+  solarPlant: buildCardArt(
+    "#5b3a08",
+    "#ab6c0a",
+    "#ffd60a",
+    `<g>
+      <circle cx="248" cy="40" r="20" fill="#ffe27a" fill-opacity="0.95"/>
+      <g stroke="#d9eef4" stroke-width="4" stroke-linecap="round">
+        <path d="M88 114L98 78L134 114" />
+        <path d="M166 114L176 68L216 114" />
+      </g>
+      <g fill="#0f2741">
+        <rect x="72" y="74" width="34" height="20" rx="2"/>
+        <rect x="108" y="74" width="34" height="20" rx="2"/>
+        <rect x="150" y="64" width="34" height="20" rx="2"/>
+        <rect x="186" y="64" width="34" height="20" rx="2"/>
+      </g>
+    </g>`
+  ),
+  fusionReactor: buildCardArt(
+    "#31124b",
+    "#5b1f7f",
+    "#f72585",
+    `<g>
+      <circle cx="160" cy="80" r="42" fill="#12061f" fill-opacity="0.9"/>
+      <circle cx="160" cy="80" r="22" fill="#ff86c5" fill-opacity="0.85"/>
+      <circle cx="160" cy="80" r="10" fill="#fff3f8"/>
+      <path d="M112 84C126 52 194 52 208 84" stroke="#fbb1db" stroke-width="6" stroke-linecap="round"/>
+      <path d="M122 108C140 124 180 124 198 108" stroke="#f72585" stroke-width="5" stroke-linecap="round"/>
+    </g>`
+  ),
+  roboticsFactory: buildCardArt(
+    "#21293d",
+    "#44506e",
+    "#89a3ff",
+    `<g>
+      <rect x="52" y="62" width="94" height="56" rx="14" fill="#141b2d" fill-opacity="0.92"/>
+      <rect x="160" y="48" width="114" height="70" rx="16" fill="#1b243a" fill-opacity="0.94"/>
+      <circle cx="106" cy="90" r="18" fill="#91a4ff" fill-opacity="0.85"/>
+      <circle cx="222" cy="80" r="24" fill="#c6d0ff" fill-opacity="0.8"/>
+      <path d="M222 56V104M198 80H246" stroke="#ffffff" stroke-opacity="0.58" stroke-width="5" stroke-linecap="round"/>
+    </g>`
+  ),
+  naniteFactory: buildCardArt(
+    "#141a2a",
+    "#22324d",
+    "#8fd3ff",
+    `<g>
+      <path d="M70 102L110 58L146 102L110 118Z" fill="#b5ebff" fill-opacity="0.86"/>
+      <path d="M138 104L176 44L214 104L176 120Z" fill="#e0f8ff" fill-opacity="0.94"/>
+      <path d="M204 102L240 64L274 102L240 116Z" fill="#8fd3ff" fill-opacity="0.8"/>
+      <circle cx="176" cy="82" r="8" fill="#0a1222"/>
+    </g>`
+  ),
+  shipyard: buildCardArt(
+    "#1b2847",
+    "#254f88",
+    "#82d8ff",
+    `<g>
+      <rect x="48" y="78" width="220" height="40" rx="18" fill="#0f172b" fill-opacity="0.9"/>
+      <path d="M96 76L146 54L212 60L248 76L208 88H122Z" fill="#d9f2ff" fill-opacity="0.9"/>
+      <path d="M136 60L174 42L208 48L186 60Z" fill="#84d4ff" fill-opacity="0.82"/>
+      <path d="M68 56H94V80H68Z" fill="#274c7d" fill-opacity="0.92"/>
+    </g>`
+  ),
+  metalStorage: buildCardArt("#2c343f", "#53606d", "#cfd9df", `<g><rect x="74" y="48" width="58" height="70" rx="14" fill="#d0d5da" fill-opacity="0.88"/><rect x="138" y="38" width="64" height="80" rx="16" fill="#b0b8c1" fill-opacity="0.86"/><rect x="208" y="56" width="42" height="62" rx="12" fill="#89939d" fill-opacity="0.8"/></g>`),
+  crystalStorage: buildCardArt("#112d46", "#2a4d69", "#78c6ff", `<g><rect x="60" y="64" width="56" height="54" rx="14" fill="#78c6ff" fill-opacity="0.7"/><rect x="124" y="42" width="68" height="76" rx="18" fill="#c4f1ff" fill-opacity="0.88"/><rect x="200" y="58" width="52" height="60" rx="16" fill="#7dd3fc" fill-opacity="0.72"/></g>`),
+  deuteriumTank: buildCardArt("#0f2f3d", "#1e6075", "#76f7ff", `<g><ellipse cx="100" cy="86" rx="28" ry="34" fill="#70e4f4" fill-opacity="0.74"/><rect x="126" y="50" width="68" height="68" rx="24" fill="#c6fbff" fill-opacity="0.82"/><ellipse cx="230" cy="86" rx="26" ry="30" fill="#40bfd9" fill-opacity="0.66"/></g>`),
+  researchLab: buildCardArt("#261443", "#4f2b83", "#d6b3ff", `<g><rect x="54" y="64" width="72" height="54" rx="16" fill="#0d1022" fill-opacity="0.92"/><rect x="138" y="46" width="128" height="72" rx="18" fill="#161a32" fill-opacity="0.95"/><circle cx="188" cy="82" r="20" fill="#e5d1ff" fill-opacity="0.9"/><path d="M188 62V102M168 82H208" stroke="#48227c" stroke-width="5" stroke-linecap="round"/></g>`),
+};
+
+const RESEARCH_ART: Record<string, string> = {
+  energyTech: buildCardArt("#3a2c0d", "#8a5d0c", "#ffd166", `<g><path d="M148 32L116 88H152L132 128L212 66H168L188 32Z" fill="#ffe29a" fill-opacity="0.96"/></g>`),
+  combustionDrive: buildCardArt("#45130f", "#8f2d1f", "#ff8c42", `<g><path d="M162 38C136 68 134 92 146 106C156 118 174 118 184 106C196 92 194 68 162 38Z" fill="#ff9b54" fill-opacity="0.92"/><path d="M162 64C152 78 150 88 154 94C158 100 166 100 170 94C174 88 172 78 162 64Z" fill="#fff1da" fill-opacity="0.82"/></g>`),
+  impulseDrive: buildCardArt("#0c2442", "#124e78", "#68d8ff", `<g><path d="M96 96L154 44L214 70L184 96Z" fill="#d8f5ff" fill-opacity="0.9"/><path d="M184 96L230 106L198 118L142 112Z" fill="#8fd8ff" fill-opacity="0.76"/><circle cx="230" cy="78" r="16" fill="#7ae3ff" fill-opacity="0.88"/></g>`),
+  hyperspaceDrive: buildCardArt("#160b2f", "#38136a", "#b388ff", `<g><circle cx="160" cy="80" r="38" stroke="#d2b8ff" stroke-width="8" stroke-opacity="0.9"/><circle cx="160" cy="80" r="18" fill="#ffffff" fill-opacity="0.74"/><path d="M122 80H198" stroke="#f1e8ff" stroke-width="4" stroke-linecap="round"/></g>`),
+  computerTech: buildCardArt("#0f2136", "#183d63", "#82c7ff", `<g><rect x="72" y="42" width="176" height="82" rx="16" fill="#d9efff" fill-opacity="0.9"/><rect x="86" y="56" width="148" height="48" rx="8" fill="#16314d"/><circle cx="118" cy="80" r="8" fill="#82c7ff"/><path d="M142 80H210" stroke="#8fd0ff" stroke-width="6" stroke-linecap="round"/></g>`),
+  astrophysics: buildCardArt("#091124", "#1a2847", "#9fd8ff", `<g><circle cx="164" cy="84" r="34" fill="#cbeaff" fill-opacity="0.88"/><circle cx="164" cy="84" r="10" fill="#091124"/><path d="M164 50C194 50 220 68 232 92" stroke="#ffffff" stroke-opacity="0.66" stroke-width="4"/><circle cx="232" cy="92" r="6" fill="#ffe29a"/></g>`),
+  igrNetwork: buildCardArt("#082433", "#0f4f63", "#71f0d0", `<g><circle cx="94" cy="96" r="18" fill="#71f0d0" fill-opacity="0.86"/><circle cx="160" cy="58" r="18" fill="#d8fff5" fill-opacity="0.88"/><circle cx="226" cy="96" r="18" fill="#71f0d0" fill-opacity="0.8"/><path d="M108 86L146 66L212 86" stroke="#d8fff5" stroke-width="5" stroke-linecap="round"/></g>`),
+};
+
+const SHIP_ART: Record<string, string> = {
+  smallCargo: buildCardArt(
+    "#10243d",
+    "#1b4a78",
+    "#8fd8ff",
+    `<g>
+      <path d="M68 96L128 64L212 70L254 94L206 108L110 108Z" fill="#dff4ff" fill-opacity="0.92"/>
+      <path d="M138 68L176 46L212 52L190 68Z" fill="#8dd4ff" fill-opacity="0.84"/>
+      <rect x="84" y="92" width="28" height="10" rx="4" fill="#1a3556"/>
+      <circle cx="242" cy="90" r="11" fill="#7ae7ff" fill-opacity="0.9"/>
+    </g>`
+  ),
+  largeCargo: buildCardArt(
+    "#15263f",
+    "#305983",
+    "#c7e9ff",
+    `<g>
+      <path d="M44 98L116 58L232 62L282 94L222 114L92 114Z" fill="#e9f7ff" fill-opacity="0.94"/>
+      <path d="M126 62L182 34L230 40L198 62Z" fill="#a9ddff" fill-opacity="0.82"/>
+      <rect x="78" y="98" width="52" height="12" rx="4" fill="#244162"/>
+      <circle cx="268" cy="90" r="14" fill="#bdf0ff" fill-opacity="0.92"/>
+    </g>`
+  ),
+  colonyShip: buildCardArt(
+    "#173231",
+    "#2c6d68",
+    "#b7fff0",
+    `<g>
+      <path d="M58 92L134 52L220 58L264 86L202 114L104 114Z" fill="#e8fff8" fill-opacity="0.93"/>
+      <path d="M134 52L176 24L212 28L188 52Z" fill="#aaf4e4" fill-opacity="0.84"/>
+      <circle cx="160" cy="84" r="18" fill="#78e6d2" fill-opacity="0.72"/>
+      <circle cx="160" cy="84" r="8" fill="#173231"/>
+      <circle cx="248" cy="84" r="13" fill="#b7fff0" fill-opacity="0.88"/>
+    </g>`
+  ),
+};
+
+function getBuildingArt(key: string): string {
+  const fallback = BUILDING_ART[key] ?? buildCardArt("#172133", "#283b5b", "#8db0ff", `<g><rect x="78" y="48" width="164" height="70" rx="18" fill="#d6e0ff" fill-opacity="0.84"/></g>`);
+  return resolveGameArt(key, fallback);
+}
+
+function getResearchArt(key: string): string {
+  const fallback = RESEARCH_ART[key] ?? buildCardArt("#152032", "#263f63", "#9dbfff", `<g><circle cx="160" cy="80" r="34" fill="#dbe8ff" fill-opacity="0.86"/></g>`);
+  return resolveGameArt(key, fallback);
+}
+
+function getShipArt(key: string): string {
+  const fallback = SHIP_ART[key] ?? buildCardArt("#152032", "#263f63", "#9dbfff", `<g><rect x="72" y="58" width="176" height="46" rx="16" fill="#dbe8ff" fill-opacity="0.86"/></g>`);
+  return resolveGameArt(key, fallback);
+}
+
 function checkBuildingRequirements(buildingKey: string, planet: Planet, research: Research): RequirementCheck | null {
   const building = BUILDINGS.find(entry => entry.key === buildingKey);
   if (!building) return null;
@@ -277,14 +477,32 @@ const CSS = `
     transition: all 0.15s; border-left: 2px solid transparent; }
   .nav-item:hover { color: var(--text); background: rgba(155,93,229,0.05); }
   .nav-item.active { color: var(--cyan); border-left-color: var(--cyan); background: rgba(0,245,212,0.05); }
+  .nav-item:focus-visible,
+  .mobile-more-item:focus-visible,
+  .mobile-drawer-close:focus-visible,
+  [data-psg1-focusable='true']:focus-visible,
+  .psg1-focus { outline: 2px solid rgba(0,245,212,0.9); outline-offset: 2px; }
   .nav-badge { margin-left: auto; font-size: 9px; padding: 2px 6px; background: var(--danger);
     border-radius: 10px; color: white; font-weight: 700; }
-  .main { grid-area: main; overflow-y: auto; padding: 24px;
+  .main { grid-area: main; overflow-y: auto; padding: 0 24px 24px;
     scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   .main-shell { position:relative; }
   .main-shell::before { content:""; position:absolute; inset:0; background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 25%), radial-gradient(circle at 75% 10%, rgba(255,255,255,0.03), transparent 30%); pointer-events:none; }
   .main::-webkit-scrollbar { width: 4px; }
   .main::-webkit-scrollbar-thumb { background: var(--border); }
+  .desktop-tab-chrome { display:grid; gap:16px; padding-top:20px; }
+  .desktop-resource-shell { position: sticky; top: 0; z-index: 6; padding: 14px 0 2px; background: transparent; backdrop-filter: none; }
+  .desktop-resource-menu { display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:12px; padding:14px 16px; border-radius:20px; }
+  .desktop-resource-pill { position:relative; overflow:hidden; padding:14px 16px; border-radius:16px; border:1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(8,10,22,0.94)); box-shadow: inset 0 1px 0 rgba(255,255,255,0.04); min-width:0; }
+  .desktop-resource-pill::before { content:""; position:absolute; inset:0; background: linear-gradient(135deg, rgba(255,255,255,0.04), transparent 46%, rgba(255,255,255,0.02)); pointer-events:none; }
+  .desktop-resource-pill > * { position:relative; z-index:1; }
+  .desktop-resource-label { font-size:9px; letter-spacing:2px; text-transform:uppercase; color:rgba(200,214,229,0.54); }
+  .desktop-resource-value { margin-top:8px; font-family:'Orbitron',sans-serif; font-size:18px; color:white; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .desktop-resource-meta { margin-top:6px; font-size:10px; color:rgba(200,214,229,0.68); letter-spacing:0.8px; }
+  .desktop-resource-cap { margin-top:10px; height:3px; background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden; }
+  .desktop-resource-cap-fill { height:100%; border-radius:999px; }
+  .desktop-tab-body { min-width:0; }
+  .sidebar-top-offset { flex: 0 0 auto; height: 10px; margin: 20px 16px 8px; border-top: 1px solid rgba(255,255,255,0.08); opacity: 0.75; }
   .shell-error { border:1px solid rgba(255,0,110,0.28); background: linear-gradient(135deg, rgba(255,0,110,0.08), rgba(255,255,255,0.02)); color: #ff8fb7; padding: 12px 14px; border-radius: 12px; font-size: 11px; letter-spacing: 0.8px; margin-bottom: 16px; box-shadow: var(--shell-shadow); }
   .shell-panel { border:1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(8,10,22,0.92)); box-shadow: var(--shell-shadow); backdrop-filter: blur(16px); }
   .sidebar-planet-dot { width:8px; height:8px; border-radius:50%; background: var(--planet-accent, var(--cyan)); box-shadow: 0 0 12px var(--planet-accent, var(--cyan)); }
@@ -441,6 +659,8 @@ const CSS = `
     padding: 16px; display: flex; flex-direction: column; gap: 10px; transition: all 0.2s; box-shadow: var(--shell-shadow); }
   .building-card::before { content:""; position:absolute; inset:0; background: radial-gradient(circle at 84% 16%, rgba(155,93,229,0.08), transparent 18%), linear-gradient(145deg, rgba(255,255,255,0.04), transparent 40%); pointer-events:none; }
   .building-card:hover { border-color: rgba(155,93,229,0.4); transform: translateY(-1px); }
+  .building-card-art { position: relative; height: 110px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08); background-color: rgba(9,12,24,0.92); background-size: cover; background-position: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); overflow: hidden; }
+  .building-card-art::after { content:""; position:absolute; inset:0; background: linear-gradient(180deg, rgba(255,255,255,0.05), transparent 32%, rgba(5,8,16,0.2)); pointer-events:none; }
   .building-header { display: flex; align-items: center; justify-content: space-between; }
   .building-icon-name { display: flex; align-items: center; gap: 8px; }
   .building-icon { font-size: 16px; }
@@ -468,6 +688,8 @@ const CSS = `
   .ship-build-card:hover { border-color: rgba(0,245,212,0.3); transform: translateY(-1px); }
   .ship-build-card.locked { border-color: rgba(255,0,110,0.2); }
   .ship-build-card.locked:hover { border-color: rgba(255,0,110,0.4); }
+  .ship-card-art { position: relative; width: 100%; height: 132px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08); background-color: rgba(9,12,24,0.92); background-size: contain; background-repeat: no-repeat; background-position: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); overflow: hidden; }
+  .ship-card-art::after { content:""; position:absolute; inset:0; background: radial-gradient(circle at 50% 48%, rgba(125,216,255,0.14), transparent 42%), linear-gradient(180deg, rgba(255,255,255,0.05), transparent 32%, rgba(5,8,16,0.2)); pointer-events:none; }
   .ship-build-header { display: flex; align-items: center; justify-content: space-between; }
   .ship-build-icon-name { display: flex; align-items: center; gap: 8px; }
   .ship-build-icon { font-size: 20px; }
@@ -486,6 +708,11 @@ const CSS = `
   .ship-build-btn.locked-btn:hover { background: rgba(255,0,110,0.15); }
   .ship-card { position:relative; overflow:hidden; background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(8,10,22,0.95)); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px;
     padding: 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; box-shadow: var(--shell-shadow); }
+  .fleet-ship-card { align-items: stretch; gap: 12px; }
+  .fleet-ship-card-art { position: relative; height: 132px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); background-color: rgba(9,12,24,0.92); background-size: contain; background-repeat: no-repeat; background-position: center; box-shadow: inset 0 1px 0 rgba(255,255,255,0.06); overflow: hidden; }
+  .fleet-ship-card-art::before { content:""; position:absolute; inset:0; background: radial-gradient(circle at 50% 48%, rgba(125,216,255,0.14), transparent 42%), linear-gradient(180deg, rgba(255,255,255,0.04), rgba(5,8,16,0.12)); pointer-events:none; }
+  .fleet-ship-card-copy { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; width:100%; }
+  .fleet-ship-card-name { font-size: 10px; color: var(--dim); letter-spacing: 1px; text-transform: uppercase; }
   .ship-icon { font-size: 22px; }
   .ship-name { font-size: 9px; color: var(--dim); text-align: center; letter-spacing: 1px; }
   .ship-count { font-family: 'Orbitron', sans-serif; font-size: 18px; font-weight: 700; color: var(--cyan); }
@@ -504,6 +731,10 @@ const CSS = `
   .mission-eta { color: var(--cyan); font-weight: 600; }
   .mission-ships { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
   .mission-ship-badge { font-size: 10px; background: rgba(155,93,229,0.08); border: 1px solid var(--border); border-radius: 2px; padding: 2px 6px; color: var(--text); }
+  .mission-ship-media { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 10px; }
+  .mission-ship-card { width: 112px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(8,10,22,0.94)); box-shadow: var(--shell-shadow); }
+  .mission-ship-card-art { height: 68px; background-size: cover; background-position: center; }
+  .mission-ship-card-copy { padding: 8px 10px; display: flex; justify-content: space-between; gap: 8px; font-size: 9px; letter-spacing: 0.8px; color: var(--text); }
   .apply-btn { font-family: 'Share Tech Mono', monospace; font-size: 10px; letter-spacing: 1px;
     padding: 6px 14px; border-radius: 2px; border: 1px solid var(--success); background: rgba(6,214,160,0.1);
     color: var(--success); cursor: pointer; transition: all 0.15s; margin-top: 10px; }
@@ -539,10 +770,13 @@ const CSS = `
   .modal-label { font-size: 9px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; margin-bottom: 10px; }
   .modal-ship-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 12px; }
   @media (min-width: 500px) { .modal-ship-grid { grid-template-columns: repeat(3, 1fr); } }
-  .modal-ship-row { display: flex; align-items: center; justify-content: space-between;
+  .modal-ship-row { display: flex; flex-direction: column; gap: 10px;
     background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 12px; padding: 8px 10px; }
   .modal-ship-label { font-size: 10px; color: var(--text); display: flex; align-items: center; gap: 5px; }
   .modal-ship-avail { font-size: 9px; color: var(--dim); }
+  .modal-ship-top { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .modal-ship-copy { display:grid; gap:4px; }
+  .modal-ship-art { height: 88px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08); background-size: cover; background-position: center; background-color: rgba(9,12,24,0.92); overflow:hidden; }
   .modal-input { width: 64px; padding: 6px 8px; font-size: 12px; border-radius: 10px; text-align: right;
     background: rgba(0,0,0,0.4); border: 1px solid var(--border); color: var(--text); }
   .modal-select { padding: 8px 10px; font-size: 12px; border-radius: 2px; width: 100%;
@@ -590,7 +824,7 @@ const CSS = `
     background:rgba(155,93,229,0.1); border:1px solid rgba(155,93,229,0.3); color:var(--purple); }
   .notice-box { background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(8,10,22,0.95)); border: 1px solid rgba(155,93,229,0.2);
     border-radius: 18px; padding: 14px 16px; font-size: 10px; color: var(--dim); letter-spacing: 1px; margin-bottom: 16px; box-shadow: var(--shell-shadow); }
-  .wallet-adapter-button { font-family:'Share Tech Mono',monospace !important; font-size:11px !important; letter-spacing:1px !important; border-radius:2px !important; margin-right: 0 !important; }
+  .wallet-adapter-button { font-family:'Share Tech Mono',monospace !important; font-size:11px !important; letter-spacing:1px !important; border-radius:14px !important; margin-right: 0 !important; min-height: 34px !important; height: 34px !important; padding: 0 12px !important; }
   @media (max-width: 767px) {
     .grid-2 { grid-template-columns: 1fr; }
     .grid-3 { grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -605,6 +839,9 @@ const CSS = `
     .build-queue-banner { flex-direction: column; gap: 10px; align-items: flex-start; }
     .build-queue-right { width: 100%; display: flex; align-items: center; justify-content: space-between; }
     .mission-header { flex-wrap: wrap; gap: 6px; }
+  }
+  @media (max-width: 1180px) {
+    .desktop-resource-menu { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 400px) { .grid-3 { grid-template-columns: 1fr; } }
   .req-modal { background: var(--panel); border: 1px solid rgba(255,0,110,0.3);
@@ -823,6 +1060,22 @@ const LogoSVG: React.FC<{ size?: number }> = ({ size = 32 }) => (
     <rect x="26" y="26" width="36" height="36" rx="6" transform="rotate(45 50 50)" stroke="url(#lg1)" strokeWidth="4" fill="none" opacity="0.85"/>
     <rect x="36" y="36" width="20" height="20" rx="4" transform="rotate(45 50 50)" stroke="url(#lg1)" strokeWidth="3.5" fill="none" opacity="0.7"/>
   </svg>
+);
+
+const LandingScreen: React.FC<{ isMobile: boolean }> = ({ isMobile }) => (
+  <div className="landing">
+    <div className="landing-logo"><LogoSVG size={isMobile ? 80 : 120}/></div>
+    <div><div className="landing-title">GAMESOL</div><div className="landing-sub">On-chain space strategy Â· Solana</div></div>
+    <WalletConnectControl/>
+  </div>
+);
+
+const ConnectingScreenPanel: React.FC = () => (
+  <div style={{height:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24}}>
+    <LogoSVG size={72}/>
+    <div className="spinner" style={{width:"56px",height:"56px",borderWidth:"5px"}}/>
+    <div style={{fontFamily:"'Orbitron',sans-serif",fontSize:"15px",letterSpacing:"3px",color:"var(--cyan)"}}>CONNECTING...</div>
+  </div>
 );
 
 const Starfield: React.FC = () => {
@@ -1141,6 +1394,7 @@ type CoordStatus = "idle" | "checking" | "free" | "occupied";
 
 const LaunchModal: React.FC<{ fleet: Fleet; res: Resources; ownedPlanets: PlayerState[]; currentPlanetPda: string; onClose: () => void; txBusy: boolean; onCheckCoord: (galaxy: number, system: number, position: number) => Promise<boolean>; onLaunch: (ships: Record<string, number>, cargo: { metal: bigint; crystal: bigint; deuterium: bigint }, missionType: number, speedFactor: number, target: LaunchTargetInput) => Promise<void>; prefillTarget?: { galaxy: number; system: number; position: number; missionType?: number }; }> =
   ({ fleet, res, ownedPlanets, currentPlanetPda, onClose, onLaunch, txBusy, onCheckCoord, prefillTarget }) => {
+    const featuredLaunchShips = new Set(["smallCargo", "largeCargo", "colonyShip"]);
     const [shipQty, setShipQty] = useState<Record<string, number>>({});
     const [missionType, setMissionType] = useState(prefillTarget?.missionType ?? 2);
     const [cargoM, setCargoM] = useState(0); const [cargoC, setCargoC] = useState(0); const [cargoD, setCargoD] = useState(0);
@@ -1180,7 +1434,7 @@ const LaunchModal: React.FC<{ fleet: Fleet; res: Resources; ownedPlanets: Player
         if (coordCheckTimer.current) clearTimeout(coordCheckTimer.current);
       };
     }, [missionType, transportMode, targetGalaxy, targetSystem, targetPosition, scheduleCoordCheck]);
-    const handleColonyCoordChange = (galaxy: number, system: number, position: number, setterG: (v: number) => void, setterS: (v: number) => void, setterP: (v: number) => void, changedField: "g" | "s" | "p", value: number) => { const ng=changedField==="g"?value:galaxy; const ns=changedField==="s"?value:system; const np=changedField==="p"?value:position; if(changedField==="g")setterG(ng); if(changedField==="s")setterS(ns); if(changedField==="p")setterP(np); scheduleCoordCheck(ng,ns,np); };
+    const handleColonyCoordChange = (galaxy: number, system: number, position: number, setterG: (v: number) => void, setterS: (v: number) => void, setterP: (v: number) => void, changedField: "g" | "s" | "p", value: number) => { const ng=changedField==="g"?value:galaxy; const ns=changedField==="s"?value:system; const np=changedField==="p"?value:position; if(changedField==="g")setterG(ng); if(changedField==="s")setterS(ns); if(changedField==="p")setterP(np); };
     const coordStatusConfig: Record<CoordStatus, { color: string; text: string }> = { idle:{color:"var(--dim)",text:""}, checking:{color:"var(--warn)",text:"CHECKING..."}, free:{color:"var(--success)",text:"✓ SLOT FREE"}, occupied:{color:"var(--danger)",text:"✗ ALREADY OCCUPIED"} };
     const handleSubmit = async () => { try { setLocalErr(null); if(totalSent<=0)throw new Error("Select at least one ship."); if(cargoUsed>cargoCap)throw new Error("Cargo exceeds fleet capacity."); if(fleet.activeMissions>=4)throw new Error("No mission slots available."); if(missionType===5&&getQty("colonyShip")<=0)throw new Error("Colonize requires at least 1 colony ship."); if(missionType===5&&coordStatus==="occupied")throw new Error("That coordinate slot is already occupied."); if(missionType===2&&transportMode==="coords"&&coordStatus==="free")throw new Error("Transport missions can only target occupied planets."); let target: LaunchTargetInput; if(missionType===2){if(transportMode==="owned"){if(!targetEntity)throw new Error("Select a destination planet."); target={kind:"transport",mode:"owned",destinationEntity:targetEntity};}else{target={kind:"transport",mode:"coords",galaxy:targetGalaxy,system:targetSystem,position:targetPosition};}}else{target={kind:"colonize",galaxy:targetGalaxy,system:targetSystem,position:targetPosition,colonyName:colonyName.trim()||"Colony"};} setLaunching(true); await onLaunch(shipQty,{metal:BigInt(cargoM),crystal:BigInt(cargoC),deuterium:BigInt(cargoD)},missionType,speed,target); onClose(); }catch(e:any){setLocalErr(e?.message||String(e));}finally{setLaunching(false);}};
     return (
@@ -1190,7 +1444,7 @@ const LaunchModal: React.FC<{ fleet: Fleet; res: Resources; ownedPlanets: Player
           <div className="modal-section"><div className="modal-label">Mission Type</div><select className="modal-select" value={missionType} onChange={e => setMissionType(Number(e.target.value))}><option value={2}>TRANSPORT</option><option value={5}>COLONIZE</option></select></div>
           {missionType===2&&(<div className="modal-section"><div className="modal-label">Target</div><div className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>Mode</span><select className="modal-select" value={transportMode} onChange={e=>setTransportMode(e.target.value as "owned"|"coords")}><option value="owned">My planets</option><option value="coords">Coordinates</option></select></div>{transportMode==="owned"?(<div className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>Destination</span><select className="modal-select" value={targetEntity} onChange={e=>setTargetEntity(e.target.value)} disabled={selectableOwned.length===0}>{selectableOwned.length===0?<option value="">No other planets</option>:selectableOwned.map(p=>(<option key={p.entityPda} value={p.entityPda}>{p.planet.name} [{p.planet.galaxy}:{p.planet.system}:{p.planet.position}]</option>))}</select></div>):(<>{(["Galaxy","System","Position"]as const).map((label,li)=>{const vals=[targetGalaxy,targetSystem,targetPosition];const setters=[(v:number)=>setTargetGalaxy(Math.max(1,Math.min(9,v))),(v:number)=>setTargetSystem(Math.max(1,Math.min(499,v))),(v:number)=>setTargetPosition(Math.max(1,Math.min(15,v)))];return(<div key={label} className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>{label}</span><input className="modal-input" type="number" value={vals[li]} onChange={e=>setters[li](parseInt(e.target.value)||1)}/></div>);})}{coordStatus!=="idle"&&<div className="coord-status-badge" style={{color:coordStatus==="free"?"var(--danger)":coordStatusConfig[coordStatus].color}}>{coordStatus==="free"?"TRANSPORT BLOCKED: EMPTY SLOT":coordStatusConfig[coordStatus].text}</div>}</>)}</div>)}
           {missionType===5&&(<div className="modal-section"><div className="modal-label">Colony Target</div><div className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>Galaxy</span><input className="modal-input" type="number" value={targetGalaxy} onChange={e=>handleColonyCoordChange(targetGalaxy,targetSystem,targetPosition,setTargetGalaxy,setTargetSystem,setTargetPosition,"g",Math.max(1,Math.min(9,parseInt(e.target.value)||1)))}/></div><div className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>System</span><input className="modal-input" type="number" value={targetSystem} onChange={e=>handleColonyCoordChange(targetGalaxy,targetSystem,targetPosition,setTargetGalaxy,setTargetSystem,setTargetPosition,"s",Math.max(1,Math.min(499,parseInt(e.target.value)||1)))}/></div><div className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>Position</span><input className="modal-input" type="number" value={targetPosition} onChange={e=>handleColonyCoordChange(targetGalaxy,targetSystem,targetPosition,setTargetGalaxy,setTargetSystem,setTargetPosition,"p",Math.max(1,Math.min(15,parseInt(e.target.value)||1)))}/></div>{coordStatus!=="idle"&&<div className="coord-status-badge" style={{color:coordStatusConfig[coordStatus].color}}>{coordStatusConfig[coordStatus].text}</div>}<div className="modal-row" style={{marginTop:10}}><span style={{fontSize:11,color:"var(--dim)"}}>Colony Name</span><input className="modal-input" type="text" maxLength={32} value={colonyName} onChange={e=>setColonyName(e.target.value)}/></div></div>)}
-          <div className="modal-section"><div className="modal-label">Ships <span style={{color:"var(--cyan)"}}>{totalSent>0?`${totalSent} selected`:"none"}</span></div><div className="modal-ship-grid">{SHIPS.map(ship=>{const avail=((fleet as any)[ship.key]as number)??0; if(avail===0)return null; return(<div key={ship.key} className="modal-ship-row"><div><div className="modal-ship-label">{ship.icon} {ship.name}</div><div className="modal-ship-avail">Avail: {avail.toLocaleString()}</div></div><input className="modal-input" type="number" min={0} max={avail} value={getQty(ship.key)||""} placeholder="0" onChange={e=>setQty(ship.key,parseInt(e.target.value)||0)}/></div>);})}</div></div>
+          <div className="modal-section"><div className="modal-label">Ships <span style={{color:"var(--cyan)"}}>{totalSent>0?`${totalSent} selected`:"none"}</span></div><div className="modal-ship-grid">{SHIPS.map(ship=>{const avail=((fleet as any)[ship.key]as number)??0; if(avail===0)return null; const featured=featuredLaunchShips.has(ship.key); return(<div key={ship.key} className="modal-ship-row">{featured&&<div className="modal-ship-art" style={{backgroundImage:getShipArt(ship.key)}} />}<div className="modal-ship-top"><div className="modal-ship-copy"><div className="modal-ship-label">{featured?ship.name:`${ship.icon} ${ship.name}`}</div><div className="modal-ship-avail">Avail: {avail.toLocaleString()}</div></div><input className="modal-input" type="number" min={0} max={avail} value={getQty(ship.key)||""} placeholder="0" onChange={e=>setQty(ship.key,parseInt(e.target.value)||0)}/></div></div>);})}</div></div>
           {cargoCap>0&&(<div className="modal-section"><div className="modal-label">Cargo <span style={{color:cargoUsed>cargoCap?"var(--danger)":"var(--dim)"}}>{cargoUsed.toLocaleString()} / {cargoCap.toLocaleString()}</span></div>{[{label:"Metal",color:"var(--metal)",val:cargoM,max:Number(res.metal),set:setCargoM},{label:"Crystal",color:"var(--crystal)",val:cargoC,max:Number(res.crystal),set:setCargoC},{label:"Deuterium",color:"var(--deut)",val:cargoD,max:Number(res.deuterium),set:setCargoD}].map(r=>(<div key={r.label} className="modal-row"><span style={{color:r.color,fontSize:11}}>{r.label} (avail: {fmt(r.max)})</span><input className="modal-input" type="number" min={0} max={r.max} value={r.val||""} placeholder="0" onChange={e=>r.set(Math.max(0,Math.min(r.max,parseInt(e.target.value)||0)))}/></div>))}</div>)}
           <div className="modal-section"><div className="modal-label">Flight Parameters</div><div className="modal-row"><span style={{fontSize:11,color:"var(--dim)"}}>Speed (10–100%)</span><input className="modal-input" type="number" min={10} max={100} step={10} value={speed} onChange={e=>setSpeed(Math.max(10,Math.min(100,parseInt(e.target.value)||100)))}/></div></div>
           {localErr&&<div className="error-msg" style={{marginBottom:8}}>{localErr}</div>}
@@ -1255,6 +1509,7 @@ const ResearchTab: React.FC<{ research: Research; res?: Resources; planet: Plane
 
               return (
                 <div key={tech.idx} className="building-card" style={{ borderColor: !requirementsMet ? "rgba(255,0,110,0.2)" : undefined }}>
+                  <div className="building-card-art" style={{ backgroundImage: getResearchArt(tech.field) }} />
                   <div className="building-header">
                     <div className="building-icon-name">
                       <span className="building-icon">{tech.icon}</span>
@@ -1502,6 +1757,7 @@ const ResourcesTab: React.FC<{ state:PlayerState; res?:Resources; nowTs:number; 
 
               return (
                 <div key={building.idx} className="building-card" style={{ borderColor: !requirementsMet ? "rgba(255,0,110,0.2)" : undefined }}>
+                  <div className="building-card-art" style={{ backgroundImage: getBuildingArt(building.key) }} />
                   <div className="building-header">
                     <div className="building-icon-name">
                       <span className="building-icon">{building.icon}</span>
@@ -1606,6 +1862,7 @@ const BuildingsTab: React.FC<{ state:PlayerState; res?:Resources; nowTs:number; 
 
               return (
                 <div key={building.idx} className="building-card" style={{ borderColor: !requirementsMet ? "rgba(255,0,110,0.2)" : undefined }}>
+                  <div className="building-card-art" style={{ backgroundImage: getBuildingArt(building.key) }} />
                   <div className="building-header">
                     <div className="building-icon-name">
                       <span className="building-icon">{building.icon}</span>
@@ -1663,42 +1920,80 @@ const ShipyardTab: React.FC<{ state: PlayerState; res?: Resources; nowTs: number
     const currentShip = SHIPS.find(s => SHIP_TYPE_IDX[s.key] === planet.shipBuildItem);
     const canAfford = (cost: { m: number; c: number; d: number }, qty: number) => !res || (res.metal >= BigInt(cost.m * qty) && res.crystal >= BigInt(cost.c * qty) && res.deuterium >= BigInt(cost.d * qty));
     const visibleShips = SHIPS.filter(s => ["smallCargo","largeCargo","colonyShip"].includes(s.key));
-    return (<><div><div className="section-title">SHIPYARD</div><div style={{fontSize:10,color:"var(--dim)",letterSpacing:1,marginBottom:20}}>Shipyard Lv {planet.shipyard} · Timed construction queue</div>{shipyardInProgress&&currentShip&&(<div className="build-queue-banner" style={{marginBottom:20}}><div><div className="build-queue-label">🚀 SHIPYARD</div><div className="build-queue-item-name">{currentShip.icon} {currentShip.name} × {planet.shipBuildQty}</div></div><div className="build-queue-right" style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}><div className="build-queue-eta">{fmtCountdown(shipyardSecsLeft)}</div>{shipyardSecsLeft===0&&<button className="build-btn finish-btn" disabled={txBusy} onClick={onFinishShipyard}>FINISH SHIPYARD</button>}<InstantFinishButton secondsLeft={shipyardSecsLeft} balance={antimatterBalance} enabled={antimatterEnabled} txBusy={txBusy} onClick={onInstantFinishShipyard}/></div></div>)}<div className="grid-3">{visibleShips.map(ship=>{const typeIdx=SHIP_TYPE_IDX[ship.key]; if(typeIdx===undefined)return null; const qty=Math.max(1,quantities[ship.key]??1); const affordable=canAfford(ship.cost,qty); const current=((state.fleet as any)[ship.key]as number)??0; const check=checkShipRequirements(ship.key,research,planet); const reqsMet=check?.allMet??true; const missingCount=check?.requirements.filter(r=>!r.met).length??0; const disabled=txBusy||shipyardInProgress||!affordable; return(<div key={ship.key} className={`ship-build-card${!reqsMet?" locked":""}`}><div className="ship-build-header"><div className="ship-build-icon-name"><span className="ship-build-icon">{ship.icon}</span><div><div className="ship-build-name">{ship.name}</div>{!reqsMet&&<div style={{fontSize:9,color:"var(--danger)",letterSpacing:0.5,marginTop:2,display:"flex",alignItems:"center",gap:4}}><span style={{width:5,height:5,borderRadius:"50%",background:"var(--danger)",display:"inline-block"}}/> locked{missingCount>0?` · ${missingCount} missing`:""}</div>}{reqsMet&&<div style={{fontSize:9,color:"var(--success)",letterSpacing:0.5,marginTop:2,display:"flex",alignItems:"center",gap:4}}><span style={{width:5,height:5,borderRadius:"50%",background:"var(--success)",display:"inline-block"}}/> unlocked</div>}</div></div><div className={`ship-build-count${current===0?" zero":""}`}>{current.toLocaleString()}</div></div><div style={{fontSize:10,color:"var(--dim)",margin:"8px 0"}}>{ship.cost.m>0&&<div style={{color:!res||res.metal>=BigInt(ship.cost.m*qty)?"var(--text)":"var(--danger)"}}>Metal: {fmt(ship.cost.m*qty)}</div>}{ship.cost.c>0&&<div style={{color:!res||res.crystal>=BigInt(ship.cost.c*qty)?"var(--text)":"var(--danger)"}}>Crystal: {fmt(ship.cost.c*qty)}</div>}{ship.cost.d>0&&<div style={{color:!res||res.deuterium>=BigInt(ship.cost.d*qty)?"var(--text)":"var(--danger)"}}>Deuterium: {fmt(ship.cost.d*qty)}</div>}</div><div className="ship-qty-row"><input className="qty-input" type="number" min={1} value={qty} onChange={e=>setQuantities(prev=>({...prev,[ship.key]:Math.max(1,parseInt(e.target.value)||1)}))} disabled={txBusy||shipyardInProgress}/><button className={`ship-build-btn${!reqsMet?" locked-btn":""}`} disabled={disabled} onClick={()=>{if(!reqsMet&&check){setReqCheck(check);return;}onBuildShip(typeIdx,qty);}}>{shipyardInProgress?"QUEUE BUSY":!reqsMet?`REQUIREMENTS (${missingCount})`:`BUILD ×${qty}`}</button></div></div>);})}</div></div><ShipRequirementsModal check={reqCheck} onClose={()=>setReqCheck(null)} onGoBuildings={onGoBuildings} onGoResearch={onGoResearch}/></>);
+    return (<><div><div className="section-title">SHIPYARD</div><div style={{fontSize:10,color:"var(--dim)",letterSpacing:1,marginBottom:20}}>Shipyard Lv {planet.shipyard} · Timed construction queue</div>{shipyardInProgress&&currentShip&&(<div className="build-queue-banner" style={{marginBottom:20}}><div><div className="build-queue-label">🚀 SHIPYARD</div><div className="build-queue-item-name">{currentShip.name} × {planet.shipBuildQty}</div></div><div className="build-queue-right" style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}><div className="build-queue-eta">{fmtCountdown(shipyardSecsLeft)}</div>{shipyardSecsLeft===0&&<button className="build-btn finish-btn" disabled={txBusy} onClick={onFinishShipyard}>FINISH SHIPYARD</button>}<InstantFinishButton secondsLeft={shipyardSecsLeft} balance={antimatterBalance} enabled={antimatterEnabled} txBusy={txBusy} onClick={onInstantFinishShipyard}/></div></div>)}<div className="grid-3">{visibleShips.map(ship=>{const typeIdx=SHIP_TYPE_IDX[ship.key]; if(typeIdx===undefined)return null; const qty=Math.max(1,quantities[ship.key]??1); const affordable=canAfford(ship.cost,qty); const current=((state.fleet as any)[ship.key]as number)??0; const check=checkShipRequirements(ship.key,research,planet); const reqsMet=check?.allMet??true; const missingCount=check?.requirements.filter(r=>!r.met).length??0; const disabled=txBusy||shipyardInProgress||!affordable; return(<div key={ship.key} className={`ship-build-card${!reqsMet?" locked":""}`}><div className="ship-card-art" style={{ backgroundImage: getShipArt(ship.key) }} /><div className="ship-build-header"><div className="ship-build-icon-name"><div><div className="ship-build-name">{ship.name}</div>{!reqsMet&&<div style={{fontSize:9,color:"var(--danger)",letterSpacing:0.5,marginTop:2,display:"flex",alignItems:"center",gap:4}}><span style={{width:5,height:5,borderRadius:"50%",background:"var(--danger)",display:"inline-block"}}/> locked{missingCount>0?` · ${missingCount} missing`:""}</div>}{reqsMet&&<div style={{fontSize:9,color:"var(--success)",letterSpacing:0.5,marginTop:2,display:"flex",alignItems:"center",gap:4}}><span style={{width:5,height:5,borderRadius:"50%",background:"var(--success)",display:"inline-block"}}/> unlocked</div>}</div></div><div className={`ship-build-count${current===0?" zero":""}`}>{current.toLocaleString()}</div></div><div style={{fontSize:10,color:"var(--dim)",margin:"8px 0"}}>{ship.cost.m>0&&<div style={{color:!res||res.metal>=BigInt(ship.cost.m*qty)?"var(--text)":"var(--danger)"}}>Metal: {fmt(ship.cost.m*qty)}</div>}{ship.cost.c>0&&<div style={{color:!res||res.crystal>=BigInt(ship.cost.c*qty)?"var(--text)":"var(--danger)"}}>Crystal: {fmt(ship.cost.c*qty)}</div>}{ship.cost.d>0&&<div style={{color:!res||res.deuterium>=BigInt(ship.cost.d*qty)?"var(--text)":"var(--danger)"}}>Deuterium: {fmt(ship.cost.d*qty)}</div>}</div><div className="ship-qty-row"><input className="qty-input" type="number" min={1} value={qty} onChange={e=>setQuantities(prev=>({...prev,[ship.key]:Math.max(1,parseInt(e.target.value)||1)}))} disabled={txBusy||shipyardInProgress}/><button className={`ship-build-btn${!reqsMet?" locked-btn":""}`} disabled={disabled} onClick={()=>{if(!reqsMet&&check){setReqCheck(check);return;}onBuildShip(typeIdx,qty);}}>{shipyardInProgress?"QUEUE BUSY":!reqsMet?`REQUIREMENTS (${missingCount})`:`BUILD ×${qty}`}</button></div></div>);})}</div></div><ShipRequirementsModal check={reqCheck} onClose={()=>setReqCheck(null)} onGoBuildings={onGoBuildings} onGoResearch={onGoResearch}/></>);
   };
 
 const FleetTab: React.FC<{ fleet:Fleet; res?:Resources; txBusy:boolean; onOpenLaunch:()=>void }> =
   ({ fleet, txBusy, onOpenLaunch }) => {
     const totalShips=SHIPS.reduce((s,sh)=>s+((fleet as any)[sh.key]??0),0);
-    const utilityShips=SHIPS.filter(s=>["smallCargo","largeCargo","recycler","colonyShip"].includes(s.key));
-    return (<div><div className="section-title">FLEET COMMAND</div><div className="grid-4" style={{marginBottom:20}}><div className="card"><div className="card-label">Ships</div><div className="card-value">{totalShips.toLocaleString()}</div></div><div className="card"><div className="card-label">Missions</div><div className="card-value">{fleet.activeMissions}</div></div><div className="card"><div className="card-label">Slots</div><div className="card-value">{4-fleet.activeMissions}/4</div></div><div className="card"><div className="card-label">Cargo</div><div className="card-value" style={{fontSize:12}}>{fmt(fleet.smallCargo*5000+fleet.largeCargo*25000+fleet.recycler*20000)}</div></div></div><button onClick={onOpenLaunch} disabled={txBusy} style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,letterSpacing:1,padding:"12px 20px",border:"1px solid var(--cyan)",background:"rgba(0,245,212,0.1)",color:"var(--cyan)",cursor:"pointer",borderRadius:2,textTransform:"uppercase",width:"100%",marginBottom:20}}>⊹ LAUNCH FLEET</button><div className="section-title">HANGAR</div><div className="grid-3">{utilityShips.map(s=>{const count=(fleet as any)[s.key]??0; return(<div key={s.key} className="ship-card"><div className="ship-icon">{s.icon}</div><div className="ship-name">{s.name}</div><div className={`ship-count${count===0?" zero":""}`}>{count.toLocaleString()}</div></div>);})}</div></div>);
+    const utilityShips=SHIPS.filter(s=>["smallCargo","largeCargo","colonyShip"].includes(s.key));
+    return (<div><div className="section-title">FLEET COMMAND</div><div className="grid-4" style={{marginBottom:20}}><div className="card"><div className="card-label">Ships</div><div className="card-value">{totalShips.toLocaleString()}</div></div><div className="card"><div className="card-label">Missions</div><div className="card-value">{fleet.activeMissions}</div></div><div className="card"><div className="card-label">Slots</div><div className="card-value">{4-fleet.activeMissions}/4</div></div><div className="card"><div className="card-label">Cargo</div><div className="card-value" style={{fontSize:12}}>{fmt(fleet.smallCargo*5000+fleet.largeCargo*25000)}</div></div></div><button onClick={onOpenLaunch} disabled={txBusy} style={{fontFamily:"'Share Tech Mono',monospace",fontSize:11,letterSpacing:1,padding:"12px 20px",border:"1px solid var(--cyan)",background:"rgba(0,245,212,0.1)",color:"var(--cyan)",cursor:"pointer",borderRadius:2,textTransform:"uppercase",width:"100%",marginBottom:20}}>⊹ LAUNCH FLEET</button><div className="section-title">HANGAR</div><div className="grid-3">{utilityShips.map(s=>{const count=(fleet as any)[s.key]??0; return(<div key={s.key} className="ship-card"><div className="ship-card-art" style={{ backgroundImage: getShipArt(s.key) }} /><div className="ship-name">{s.name}</div><div className={`ship-count${count===0?" zero":""}`}>{count.toLocaleString()}</div></div>);})}</div></div>);
   };
 
 const MissionsTab: React.FC<{ fleet:Fleet; nowTs:number; txBusy:boolean; onResolveTransport:(mission:Mission,slot:number)=>void; onResolveColonize:(mission:Mission,slot:number)=>void }> =
   ({ fleet, nowTs, txBusy, onResolveTransport, onResolveColonize }) => {
     const active=fleet.missions.map((m,i)=>({m,i})).filter(({m})=>m.missionType!==0);
     if(active.length===0)return(<div><div className="section-title">ACTIVE MISSIONS</div><div style={{textAlign:"center",padding:"60px 20px",color:"var(--dim)",fontSize:12,letterSpacing:1}}><div style={{fontSize:32,marginBottom:12}}>⊹</div><div>No missions in flight</div></div></div>);
-    return (<div><div className="section-title">ACTIVE MISSIONS</div>{active.map(({m,i})=>{const progress=missionProgress(m,nowTs); const returning=m.applied; const etaSecs=returning?Math.max(0,m.returnTs-nowTs):Math.max(0,m.arriveTs-nowTs); const typeLabel=MISSION_LABELS[m.missionType]??"UNKNOWN"; const needsResolution=(m.missionType===2&&((!m.applied&&nowTs>=m.arriveTs)||(m.applied&&m.returnTs>0&&nowTs>=m.returnTs)))||(m.missionType===5&&!m.applied&&nowTs>=m.arriveTs); const ships=[{label:"SC",n:m.sSmallCargo},{label:"LC",n:m.sLargeCargo},{label:"LF",n:m.sLightFighter},{label:"COL",n:m.sColonyShip}].filter(s=>s.n>0); const hasCargo=m.cargoMetal>0n||m.cargoCrystal>0n||m.cargoDeuterium>0n; return(<div key={i} className="mission-card"><div className="mission-header"><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><span className={`mission-type-badge ${m.missionType===2?"transport":"other"}`}>{typeLabel}</span><span className="tag">SLOT {i}</span>{needsResolution&&<span style={{fontSize:9,color:"var(--success)",letterSpacing:1,padding:"2px 6px",border:"1px solid rgba(6,214,160,0.4)",borderRadius:2}}></span>}</div>{returning&&<span className="mission-returning">↩ RETURN</span>}</div><div className="progress-bar"><div className={`progress-fill ${returning?"returning":"outbound"}`} style={{width:`${progress}%`}}/></div><div className="mission-info"><span>{returning?"Return ETA":"Arrive ETA"}</span><span className="mission-eta">{etaSecs<=0?"ARRIVED":fmtCountdown(etaSecs)}</span></div><div className="mission-ships">{ships.map(s=><span key={s.label} className="mission-ship-badge">{s.label} ×{s.n.toLocaleString()}</span>)}</div>{hasCargo&&<div style={{marginTop:8,fontSize:10,color:"var(--dim)",display:"flex",gap:12,flexWrap:"wrap"}}>{m.cargoMetal>0n&&<span style={{color:"var(--metal)"}}>⛏ {fmt(m.cargoMetal)}</span>}{m.cargoCrystal>0n&&<span style={{color:"var(--crystal)"}}>💎 {fmt(m.cargoCrystal)}</span>}{m.cargoDeuterium>0n&&<span style={{color:"var(--deut)"}}>🧪 {fmt(m.cargoDeuterium)}</span>}</div>}{needsResolution&&<button className="apply-btn" disabled={txBusy} onClick={()=>m.missionType===2?onResolveTransport(m,i):onResolveColonize(m,i)}>{m.missionType===2?"RESOLVE TRANSPORT":"RESOLVE COLONIZE"}</button>}</div>);})}</div>);
+    return (<div><div className="section-title">ACTIVE MISSIONS</div>{active.map(({m,i})=>{const progress=missionProgress(m,nowTs); const returning=m.applied; const etaSecs=returning?Math.max(0,m.returnTs-nowTs):Math.max(0,m.arriveTs-nowTs); const typeLabel=MISSION_LABELS[m.missionType]??"UNKNOWN"; const needsResolution=(m.missionType===2&&((!m.applied&&nowTs>=m.arriveTs)||(m.applied&&m.returnTs>0&&nowTs>=m.returnTs)))||(m.missionType===5&&!m.applied&&nowTs>=m.arriveTs); const ships=[{label:"SC",key:"smallCargo",n:m.sSmallCargo},{label:"LC",key:"largeCargo",n:m.sLargeCargo},{label:"LF",key:"lightFighter",n:m.sLightFighter},{label:"COL",key:"colonyShip",n:m.sColonyShip}].filter(s=>s.n>0); const artShips=ships.filter(s=>["smallCargo","largeCargo","colonyShip"].includes(s.key)); const hasCargo=m.cargoMetal>0n||m.cargoCrystal>0n||m.cargoDeuterium>0n; return(<div key={i} className="mission-card"><div className="mission-header"><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><span className={`mission-type-badge ${m.missionType===2?"transport":"other"}`}>{typeLabel}</span><span className="tag">SLOT {i}</span>{needsResolution&&<span style={{fontSize:9,color:"var(--success)",letterSpacing:1,padding:"2px 6px",border:"1px solid rgba(6,214,160,0.4)",borderRadius:2}}></span>}</div>{returning&&<span className="mission-returning">↩ RETURN</span>}</div><div className="progress-bar"><div className={`progress-fill ${returning?"returning":"outbound"}`} style={{width:`${progress}%`}}/></div><div className="mission-info"><span>{returning?"Return ETA":"Arrive ETA"}</span><span className="mission-eta">{etaSecs<=0?"ARRIVED":fmtCountdown(etaSecs)}</span></div><div className="mission-ships">{ships.map(s=><span key={s.label} className="mission-ship-badge">{s.label} ×{s.n.toLocaleString()}</span>)}</div>{artShips.length>0&&<div className="mission-ship-media">{artShips.map(s=><div key={s.key} className="mission-ship-card"><div className="mission-ship-card-art" style={{backgroundImage:getShipArt(s.key)}} /><div className="mission-ship-card-copy"><span>{s.label}</span><strong>×{s.n.toLocaleString()}</strong></div></div>)}</div>}{hasCargo&&<div style={{marginTop:8,fontSize:10,color:"var(--dim)",display:"flex",gap:12,flexWrap:"wrap"}}>{m.cargoMetal>0n&&<span style={{color:"var(--metal)"}}>⛏ {fmt(m.cargoMetal)}</span>}{m.cargoCrystal>0n&&<span style={{color:"var(--crystal)"}}>💎 {fmt(m.cargoCrystal)}</span>}{m.cargoDeuterium>0n&&<span style={{color:"var(--deut)"}}>🧪 {fmt(m.cargoDeuterium)}</span>}</div>}{needsResolution&&<button className="apply-btn" disabled={txBusy} onClick={()=>m.missionType===2?onResolveTransport(m,i):onResolveColonize(m,i)}>{m.missionType===2?"RESOLVE TRANSPORT":"RESOLVE COLONIZE"}</button>}</div>);})}</div>);
   };
 
 const MobileResStrip: React.FC<{ res: Resources; planet: Planet }> = ({ res, planet }) => (
   <div className="mobile-res-strip">
     {[{label:"MTL",value:res.metal,rate:res.metalHour,color:"var(--metal)"},{label:"CRY",value:res.crystal,rate:res.crystalHour,color:"var(--crystal)"},{label:"DEU",value:res.deuterium,rate:res.deuteriumHour,color:"var(--deut)"}].map(r=>(<div key={r.label} className="mobile-res-item"><div className="mobile-res-label" style={{color:r.color}}>{r.label}</div><div className="mobile-res-value" style={{color:r.color}}>{fmt(r.value)}</div><div className="mobile-res-rate">+{fmt(r.rate)}/h</div></div>))}
-    <div className="mobile-res-item" style={{minWidth:90}}><div className="mobile-res-label">⚡ PWR</div><div className="mobile-res-value" style={{color:energyEfficiency(res)>=100?"var(--success)":energyEfficiency(res)>=60?"var(--warn)":"var(--danger)",fontSize:11}}>{energyEfficiency(res)}%</div><div className="mobile-res-rate">{fmt(res.energyProduction)}/{fmt(res.energyConsumption)}</div></div>
+    <div className="mobile-res-item" style={{minWidth:90}}><div className="mobile-res-label">⚡ PWR</div><div className="mobile-res-value" style={{color:energyEfficiency(res)>=80?"var(--success)":energyEfficiency(res)>=36?"var(--warn)":"var(--danger)",fontSize:11}}>{energyEfficiency(res)}%</div><div className="mobile-res-rate">{fmt(res.energyProduction)}/{fmt(res.energyConsumption)}</div></div>
     <div className="mobile-res-item" style={{minWidth:80}}><div className="mobile-res-label">FIELDS</div><div className="mobile-res-value" style={{fontSize:11}}>{planet.usedFields}/{planet.maxFields}</div><div className="mobile-res-rate">{planet.name.slice(0,8)}</div></div>
   </div>
 );
 
 // ─── Nav definitions ──────────────────────────────────────────────────────────
+const DesktopResourceMenu: React.FC<{ res: Resources; planet: Planet }> = ({ res, planet }) => {
+  const efficiency = energyEfficiency(res);
+  const efficiencyColor = efficiency >= 80 ? "var(--success)" : efficiency >= 36 ? "var(--warn)" : "var(--danger)";
+  const resourceItems = [
+    { label: "Metal", value: res.metal, rate: res.metalHour, cap: res.metalCap, color: "var(--metal)" },
+    { label: "Crystal", value: res.crystal, rate: res.crystalHour, cap: res.crystalCap, color: "var(--crystal)" },
+    { label: "Deuterium", value: res.deuterium, rate: res.deuteriumHour, cap: res.deuteriumCap, color: "var(--deut)" },
+  ];
+
+  return (
+    <div className="desktop-resource-menu shell-panel">
+      {resourceItems.map(item => {
+        const capPct = item.cap > 0n ? Math.max(0, Math.min(100, Number((item.value * 100n) / item.cap))) : 0;
+        return (
+          <div key={item.label} className="desktop-resource-pill">
+            <div className="desktop-resource-label" style={{ color: item.color }}>{item.label}</div>
+            <div className="desktop-resource-value" style={{ color: item.color }}>{fmt(item.value)}</div>
+            <div className="desktop-resource-meta">+{fmt(item.rate)}/h · cap {fmt(item.cap)}</div>
+            <div className="desktop-resource-cap">
+              <div className="desktop-resource-cap-fill" style={{ width: `${capPct}%`, background: item.color }} />
+            </div>
+          </div>
+        );
+      })}
+      <div className="desktop-resource-pill">
+        <div className="desktop-resource-label">Energy</div>
+        <div className="desktop-resource-value" style={{ fontSize: 16, color: efficiencyColor }}>
+          {fmt(res.energyProduction)}/{fmt(res.energyConsumption)}
+        </div>
+        <div className="desktop-resource-meta" style={{ color: efficiencyColor }}>{efficiency}% efficiency</div>
+        <div className="desktop-resource-cap">
+          <div className="desktop-resource-cap-fill" style={{ width: `${Math.max(0, Math.min(100, efficiency))}%`, background: efficiencyColor }} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const PRIMARY_TABS: { id: Tab; icon: string; label: string }[] = [
   { id: "overview",  icon: "◈",  label: "Home"     },
+  { id: "resources", icon: "⛏",  label: "Resources" },
   { id: "buildings", icon: "⬡",  label: "Build"    },
+  { id: "research",  icon: "🔬", label: "Research"  },
   { id: "shipyard",  icon: "🚀", label: "Ships"    },
-  { id: "fleet",     icon: "◉",  label: "Fleet"    },
-  { id: "missions",  icon: "⊹",  label: "Missions" },
 ];
 const SECONDARY_TABS: { id: Tab; icon: string; label: string }[] = [
-  { id: "resources", icon: "⛏",  label: "Resources" },
-  { id: "research",  icon: "🔬", label: "Research"  },
+  { id: "fleet",     icon: "◉",  label: "Fleet"    },
+  { id: "missions",  icon: "⊹",  label: "Missions" },
   { id: "galaxy",    icon: "🌌", label: "Galaxy"    },
   { id: "market",    icon: "⚖",  label: "Market"    },
 ];
@@ -1751,6 +2046,7 @@ const App: React.FC = () => {
   const selectedPdaRef = useRef<string | null>(null);
   const vaultPromptResolverRef = useRef<{ resolve: (v: string) => void; reject: (r?: unknown) => void } | null>(null);
   const walletSessionRef = useRef(0);
+  const txLockRef = useRef(false);
 
   const state = planets.find(p => p.planetPda === selectedPlanetPda) ?? planets[0] ?? null;
   const hasCreatedWorld = planets.length > 0;
@@ -1975,12 +2271,37 @@ const App: React.FC = () => {
     fn: () => Promise<string | void>,
     afterTx: () => Promise<unknown> = refreshSelectedPlanetState,
   ) => {
-    if (txBusy || !clientRef.current) return;
+    if (txLockRef.current || !clientRef.current) return;
+    txLockRef.current = true;
     setTxBusy(true); setTxProgress(label); setError(null);
     try { await fn(); await afterTx(); }
     catch (e: any) { setError(e?.message ?? `${label} failed`); }
-    finally { setTxBusy(false); setTxProgress("Processing..."); }
+    finally {
+      txLockRef.current = false;
+      setTxBusy(false);
+      setTxProgress("Processing...");
+    }
   };
+
+  const handleFinishBuild = useCallback(async () => {
+    if (!clientRef.current || !state) return;
+    const latestState = await refreshSelectedPlanetState();
+    if (!latestState || latestState.planet.buildFinishTs <= 0 || latestState.planet.buildQueueItem === 255) {
+      setError(null);
+      return;
+    }
+
+    await withTx(
+      "Finish build",
+      () => clientRef.current!.finishBuild(new PublicKey(state.entityPda)),
+      async () => {
+        const refreshed = await refreshSelectedPlanetState();
+        if (!refreshed || refreshed.planet.buildFinishTs <= 0 || refreshed.planet.buildQueueItem === 255) {
+          setError(null);
+        }
+      },
+    );
+  }, [refreshSelectedPlanetState, state]);
 
   const handleRetryVaultPassword = async () => {
     if (!clientRef.current) return;
@@ -2068,6 +2389,10 @@ const App: React.FC = () => {
     await withTx("Launch fleet", () => clientRef.current!.launchFleet(new PublicKey(state.entityPda), {lf:ships.lightFighter,hf:ships.heavyFighter,cr:ships.cruiser,bs:ships.battleship,bc:ships.battlecruiser,bm:ships.bomber,ds:ships.destroyer,de:ships.deathstar,sc:ships.smallCargo,lc:ships.largeCargo,rec:ships.recycler,ep:ships.espionageProbe,col:ships.colonyShip}, cargo, missionType, speedFactor, launchTarget));
   };
 
+  const checkCoordAvailability = useCallback(async (galaxy: number, system: number, position: number) => {
+    return clientRef.current?.isCoordFree(galaxy, system, position) ?? true;
+  }, []);
+
   const executeResolveColonize = async (mission: Mission, slotIdx: number) => {
     if (!clientRef.current || !state) return;
     setConfirmation(null); setTxBusy(true); setTxProgress("Step 1/2: Creating colony planet..."); setError(null);
@@ -2095,6 +2420,69 @@ const App: React.FC = () => {
     : SECONDARY_TABS.filter(t => t.id !== "market");
   const visibleDesktopTabs: Tab[] = ["overview","resources","buildings","research","shipyard","fleet","missions","galaxy","market"]
     .filter(t => hasCreatedWorld || t !== "market") as Tab[];
+  const controllerTabs = isMobile
+    ? [...PRIMARY_TABS.map(entry => entry.id), ...visibleSecondaryTabs.map(entry => entry.id)]
+    : visibleDesktopTabs;
+
+  const cycleTab = useCallback((direction: 1 | -1) => {
+    if (controllerTabs.length === 0) return;
+    const currentIndex = controllerTabs.indexOf(tab);
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0;
+    const nextIndex = (baseIndex + direction + controllerTabs.length) % controllerTabs.length;
+    const nextTab = controllerTabs[nextIndex];
+    setTab(nextTab);
+    if (isMobile && visibleSecondaryTabs.some(entry => entry.id === nextTab)) {
+      setShowMoreDrawer(true);
+      return;
+    }
+    if (showMoreDrawer) {
+      setShowMoreDrawer(false);
+    }
+  }, [controllerTabs, isMobile, showMoreDrawer, tab, visibleSecondaryTabs]);
+
+  const handleControllerBack = useCallback(() => {
+    if (vaultPrompt) {
+      handleVaultPromptCancel();
+      return;
+    }
+    if (confirmation) {
+      setConfirmation(null);
+      return;
+    }
+    if (showLaunchModal) {
+      setShowLaunchModal(false);
+      setLaunchPrefill(undefined);
+      return;
+    }
+    if (showVaultModal) {
+      setShowVaultModal(false);
+      return;
+    }
+    if (showMoreDrawer) {
+      setShowMoreDrawer(false);
+      return;
+    }
+    if (tab !== "overview") {
+      setTab("overview");
+    }
+  }, [confirmation, handleVaultPromptCancel, showLaunchModal, showMoreDrawer, showVaultModal, tab, vaultPrompt]);
+
+  const handleControllerMenu = useCallback(() => {
+    if (showLaunchModal || confirmation || vaultPrompt) return;
+    if (isMobile) {
+      setShowMoreDrawer(value => !value);
+      return;
+    }
+    setShowVaultModal(value => !value);
+  }, [confirmation, isMobile, showLaunchModal, vaultPrompt]);
+
+  usePsg1Controls({
+    enabled: connected && !loading,
+    onBack: handleControllerBack,
+    onMenu: handleControllerMenu,
+    onNextTab: () => cycleTab(1),
+    onPreviousTab: () => cycleTab(-1),
+  });
 
   // ── Market tx callbacks ───────────────────────────────────────────────────
   const handleMarketTxStart = useCallback((label: string) => {
@@ -2138,17 +2526,17 @@ const App: React.FC = () => {
 
     switch (tab) {
       case "overview":
-        return <OverviewTab state={state} res={liveRes} nowTs={nowTs} planets={planets} onSelectPlanet={setSelectedPlanetPda} onFinishBuild={() => withTx("Finish build", () => clientRef.current!.finishBuild(new PublicKey(state.entityPda)))} onFinishResearch={() => withTx("Finish research", () => clientRef.current!.finishResearch(new PublicKey(state.entityPda)))} onFinishShipyard={() => withTx("Finish shipyard", () => clientRef.current!.finishShipBuild(new PublicKey(state.entityPda)))} onInstantFinishBuild={handleInstantFinishBuild} onInstantFinishResearch={handleInstantFinishResearch} onInstantFinishShipyard={handleInstantFinishShipyard} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} txBusy={txBusy}/>;
+        return <OverviewTab state={state} res={liveRes} nowTs={nowTs} planets={planets} onSelectPlanet={setSelectedPlanetPda} onFinishBuild={handleFinishBuild} onFinishResearch={() => withTx("Finish research", () => clientRef.current!.finishResearch(new PublicKey(state.entityPda)))} onFinishShipyard={() => withTx("Finish shipyard", () => clientRef.current!.finishShipBuild(new PublicKey(state.entityPda)))} onInstantFinishBuild={handleInstantFinishBuild} onInstantFinishResearch={handleInstantFinishResearch} onInstantFinishShipyard={handleInstantFinishShipyard} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} txBusy={txBusy}/>;
       case "resources":
-        return <ResourcesTab state={state} res={liveRes} nowTs={nowTs} onStartBuild={idx => withTx("Start build", () => clientRef.current!.startBuild(new PublicKey(state.entityPda), idx))} onFinishBuild={() => withTx("Finish build", () => clientRef.current!.finishBuild(new PublicKey(state.entityPda)))} onInstantFinishBuild={handleInstantFinishBuild} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} txBusy={txBusy} onGoBuildings={() => setTab("buildings")} onGoResearch={() => setTab("research")} />;
+        return <ResourcesTab state={state} res={liveRes} nowTs={nowTs} onStartBuild={idx => withTx("Start build", () => clientRef.current!.startBuild(new PublicKey(state.entityPda), idx))} onFinishBuild={handleFinishBuild} onInstantFinishBuild={handleInstantFinishBuild} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} txBusy={txBusy} onGoBuildings={() => setTab("buildings")} onGoResearch={() => setTab("research")} />;
       case "buildings":
-        return <BuildingsTab state={state} res={liveRes} nowTs={nowTs} onStartBuild={idx => withTx("Start build", () => clientRef.current!.startBuild(new PublicKey(state.entityPda), idx))} onFinishBuild={() => withTx("Finish build", () => clientRef.current!.finishBuild(new PublicKey(state.entityPda)))} onInstantFinishBuild={handleInstantFinishBuild} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} txBusy={txBusy} onGoBuildings={() => setTab("buildings")} onGoResearch={() => setTab("research")} />;
+        return <BuildingsTab state={state} res={liveRes} nowTs={nowTs} onStartBuild={idx => withTx("Start build", () => clientRef.current!.startBuild(new PublicKey(state.entityPda), idx))} onFinishBuild={handleFinishBuild} onInstantFinishBuild={handleInstantFinishBuild} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} txBusy={txBusy} onGoBuildings={() => setTab("buildings")} onGoResearch={() => setTab("research")} />;
       case "shipyard":
         return <ShipyardTab state={state} res={liveRes} nowTs={nowTs} txBusy={txBusy} onBuildShip={(shipType, qty) => withTx("Build ship", () => clientRef.current!.buildShip(new PublicKey(state.entityPda), shipType, qty))} onFinishShipyard={() => withTx("Finish shipyard", () => clientRef.current!.finishShipBuild(new PublicKey(state.entityPda)))} onInstantFinishShipyard={handleInstantFinishShipyard} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} onGoBuildings={() => setTab("buildings")} onGoResearch={() => setTab("research")} />;
       case "fleet":
         return <FleetTab fleet={state.fleet} res={liveRes} txBusy={txBusy} onOpenLaunch={() => { setLaunchPrefill(undefined); setShowLaunchModal(true); }}/>;
       case "missions":
-        return <MissionsTab fleet={state.fleet} nowTs={nowTs} txBusy={txBusy} onResolveTransport={(mission, slotIdx) => withTx("Resolve transport", () => clientRef.current!.resolveTransport(new PublicKey(state.entityPda), mission, slotIdx))} onResolveColonize={(mission, slotIdx) => setConfirmation({ kind: "resolveColonize", mission, slotIdx })}/>;
+        return <MissionsTab fleet={state.fleet} nowTs={nowTs} txBusy={txBusy} onResolveTransport={(mission, slotIdx) => withTx("Resolve transport", () => clientRef.current!.resolveTransport(new PublicKey(state.entityPda), mission, slotIdx), async () => { if (publicKey) await loadAllPlanets(publicKey, state.planetPda); })} onResolveColonize={(mission, slotIdx) => setConfirmation({ kind: "resolveColonize", mission, slotIdx })}/>;
       case "research":
         return <ResearchTab research={state.research} res={liveRes} planet={state.planet} txBusy={txBusy} onResearch={idx => withTx("Start research", () => clientRef.current!.startResearch(new PublicKey(state.entityPda), idx))} onFinishResearch={() => withTx("Finish research", () => clientRef.current!.finishResearch(new PublicKey(state.entityPda)))} onInstantFinishResearch={handleInstantFinishResearch} antimatterBalance={antimatterBalance} antimatterEnabled={antimatterEnabled} onGoBuildings={() => setTab("buildings")} onGoResearch={() => setTab("research")} />;
       case "galaxy":
@@ -2168,22 +2556,6 @@ const App: React.FC = () => {
   };
 
   const handleMobileTabClick = (t: Tab) => { setTab(t); setShowMoreDrawer(false); };
-
-  const Landing = () => (
-    <div className="landing">
-      <div className="landing-logo"><LogoSVG size={isMobile ? 80 : 120}/></div>
-      <div><div className="landing-title">GAMESOL</div><div className="landing-sub">On-chain space strategy · Solana</div></div>
-      <WalletMultiButton/>
-    </div>
-  );
-
-  const ConnectingScreen = () => (
-    <div style={{height:"100dvh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:24}}>
-      <LogoSVG size={72}/>
-      <div className="spinner" style={{width:"56px",height:"56px",borderWidth:"5px"}}/>
-      <div style={{fontFamily:"'Orbitron',sans-serif",fontSize:"15px",letterSpacing:"3px",color:"var(--cyan)"}}>CONNECTING...</div>
-    </div>
-  );
 
   const ALL_DESKTOP_TABS: Tab[] = ["overview","resources","buildings","research","shipyard","fleet","missions","galaxy","market"];
   const DESKTOP_TAB_ICONS: Record<Tab, string> = {
@@ -2207,8 +2579,8 @@ const App: React.FC = () => {
       <Starfield/>
       <LoadingOverlay visible={(txBusy || creating || gameConfigBusy) && !vaultPrompt} message={creating ? createProgress : txProgress}/>
 
-      {!connected && <Landing/>}
-      {connected && loading && <ConnectingScreen/>}
+      {!connected && <LandingScreen isMobile={isMobile}/>}
+      {connected && loading && <ConnectingScreenPanel/>}
 
       {/* ── DESKTOP ── */}
       {connected && !loading && !isMobile && (
@@ -2217,9 +2589,6 @@ const App: React.FC = () => {
             <div className="logo-area">
               <div className="header-cluster">
                 <LogoSVG size={28}/>
-                <div className="brand-stack">
-                  <span className="game-title">GAMESOL</span>
-                </div>
               </div>
             </div>
             <div className="header-right">
@@ -2234,30 +2603,39 @@ const App: React.FC = () => {
                   <span className="token-badge-label">ANTIMATTER</span>
                 </span>
               </div>
-              <WalletMultiButton/>
+              <WalletConnectControl/>
             </div>
           </header>
           <aside className="sidebar sidebar-shell" style={{ ...shellStyle, background: activeTheme.sidebarGradient }}>
             {state ? (<>
-              {liveRes && (
+              <div className="sidebar-top-offset" />
+              {false && liveRes && (
                 <div className="res-panel shell-panel">
                   <div className="res-label">Resources</div>
                   <div className="resource-grid">
-                    <ResRow color="var(--metal)" label="Metal" value={liveRes.metal} cap={liveRes.metalCap} rate={liveRes.metalHour}/>
-                    <ResRow color="var(--crystal)" label="Crystal" value={liveRes.crystal} cap={liveRes.crystalCap} rate={liveRes.crystalHour}/>
-                    <ResRow color="var(--deut)" label="Deuterium" value={liveRes.deuterium} cap={liveRes.deuteriumCap} rate={liveRes.deuteriumHour}/>
+                    <ResRow color="var(--metal)" label="Metal" value={liveRes!.metal} cap={liveRes!.metalCap} rate={liveRes!.metalHour}/>
+                    <ResRow color="var(--crystal)" label="Crystal" value={liveRes!.crystal} cap={liveRes!.crystalCap} rate={liveRes!.crystalHour}/>
+                    <ResRow color="var(--deut)" label="Deuterium" value={liveRes!.deuterium} cap={liveRes!.deuteriumCap} rate={liveRes!.deuteriumHour}/>
                   </div>
                   <div className="energy-row">
                     <span style={{color:"var(--dim)",fontSize:10,letterSpacing:1}}>⚡ ENERGY</span>
-                    <span style={{fontSize:11,fontWeight:600,color:energyEfficiency(liveRes)>=100?"var(--success)":energyEfficiency(liveRes)>=60?"var(--warn)":"var(--danger)"}}>
-                      {fmt(liveRes.energyProduction)}/{fmt(liveRes.energyConsumption)} ({energyEfficiency(liveRes)}%)
+                    <span style={{fontSize:11,fontWeight:600,color:energyEfficiency(liveRes!)>=100?"var(--success)":energyEfficiency(liveRes!)>=60?"var(--warn)":"var(--danger)"}}>
+                      {fmt(liveRes!.energyProduction)}/{fmt(liveRes!.energyConsumption)} ({energyEfficiency(liveRes!)}%)
                     </span>
                   </div>
                 </div>
               )}
               <nav className="nav shell-panel">
                 {visibleDesktopTabs.map(t => (
-                  <div key={t} className={`nav-item${tab===t?" active":""}`} onClick={() => setTab(t)}>
+                  <div
+                    key={t}
+                    className={`nav-item${tab===t?" active":""}`}
+                    onClick={() => setTab(t)}
+                    tabIndex={0}
+                    role="button"
+                    data-psg1-focusable="true"
+                    aria-pressed={tab===t}
+                  >
                     {DESKTOP_TAB_ICONS[t]} {t.charAt(0).toUpperCase()+t.slice(1)}
                     {t==="missions"&&activeMissionCount>0&&<span className="nav-badge">{activeMissionCount}</span>}
                   </div>
@@ -2265,7 +2643,16 @@ const App: React.FC = () => {
                 {planets.length > 1 && (<>
                   <div style={{padding:"12px 16px 4px",fontSize:"9px",letterSpacing:"2px",color:"var(--dim)",textTransform:"uppercase"}}>Planets</div>
                   {planets.map(p => (
-                    <div key={p.planetPda} className={`nav-item${p.planetPda===state.planetPda?" active":""}`} onClick={() => setSelectedPlanetPda(p.planetPda)} style={{paddingLeft:24}}>
+                    <div
+                      key={p.planetPda}
+                      className={`nav-item${p.planetPda===state.planetPda?" active":""}`}
+                      onClick={() => setSelectedPlanetPda(p.planetPda)}
+                      style={{paddingLeft:24}}
+                      tabIndex={0}
+                      role="button"
+                      data-psg1-focusable="true"
+                      aria-pressed={p.planetPda===state.planetPda}
+                    >
                       🪐 {p.planet.name||`Planet ${p.planet.planetIndex+1}`}
                     </div>
                   ))}
@@ -2276,9 +2663,14 @@ const App: React.FC = () => {
             )}
           </aside>
           <main className="main main-shell" style={{position:"relative",zIndex:1, background: activeTheme.panelGradient}}>
-            <GameConfigAdminCard visible={!!isDevConfigAdmin} config={gameConfig} mintInput={gameConfigMintInput} onMintInputChange={setGameConfigMintInput} onSubmit={handleSaveGameConfig} busy={gameConfigBusy || txBusy}/>
-            {error && <div className="shell-error">{error}</div>}
-            {renderTabContent()}
+            <div className="desktop-tab-chrome">
+              {state && liveRes && <div className="desktop-resource-shell"><DesktopResourceMenu res={liveRes} planet={state.planet} /></div>}
+              <GameConfigAdminCard visible={!!isDevConfigAdmin} config={gameConfig} mintInput={gameConfigMintInput} onMintInputChange={setGameConfigMintInput} onSubmit={handleSaveGameConfig} busy={gameConfigBusy || txBusy}/>
+              {error && <div className="shell-error">{error}</div>}
+              <div className="desktop-tab-body">
+                {renderTabContent()}
+              </div>
+            </div>
           </main>
         </div>
       )}
@@ -2289,8 +2681,6 @@ const App: React.FC = () => {
           <div className="mobile-header" style={{ background: activeTheme.headerGradient }}>
             <div className="mobile-header-left">
               <LogoSVG size={22}/>
-              <div className="brand-stack">
-              </div>
             </div>
             <div className="mobile-header-right">
               <span className="token-badge mobile-token-badge">
@@ -2300,7 +2690,7 @@ const App: React.FC = () => {
               <button className="vault-tag" onClick={() => setShowVaultModal(true)} type="button" style={{fontSize:9,padding:"3px 7px"}}>
                 {vaultBalance > 0n ? `⚿ ${formatSolBalance(vaultBalance)}` : "⚿"}
               </button>
-              <WalletMultiButton/>
+              <WalletConnectControl/>
             </div>
           </div>
           {state && liveRes && <MobileResStrip res={liveRes} planet={state.planet}/>}
@@ -2315,19 +2705,35 @@ const App: React.FC = () => {
               <div className="mobile-more-drawer">
                 <div className="mobile-more-grid">
                   {visibleSecondaryTabs.map(t => (
-                    <div key={t.id} className={`mobile-more-item${tab===t.id?" active":""}`} onClick={() => handleMobileTabClick(t.id)}>
+                    <div
+                      key={t.id}
+                      className={`mobile-more-item${tab===t.id?" active":""}`}
+                      onClick={() => handleMobileTabClick(t.id)}
+                      tabIndex={0}
+                      role="button"
+                      data-psg1-focusable="true"
+                      aria-pressed={tab===t.id}
+                    >
                       <span className="mobile-more-icon">{t.icon}</span>
                       <span className={`mobile-more-label${tab===t.id?" active":""}`}>{t.label}</span>
                     </div>
                   ))}
                   {planets.length > 1 && planets.map(p => (
-                    <div key={p.planetPda} className={`mobile-more-item${p.planetPda===state?.planetPda?" active":""}`} onClick={() => { setSelectedPlanetPda(p.planetPda); setShowMoreDrawer(false); }}>
+                    <div
+                      key={p.planetPda}
+                      className={`mobile-more-item${p.planetPda===state?.planetPda?" active":""}`}
+                      onClick={() => { setSelectedPlanetPda(p.planetPda); setShowMoreDrawer(false); }}
+                      tabIndex={0}
+                      role="button"
+                      data-psg1-focusable="true"
+                      aria-pressed={p.planetPda===state?.planetPda}
+                    >
                       <span className="mobile-more-icon">🪐</span>
                       <span className={`mobile-more-label${p.planetPda===state?.planetPda?" active":""}`}>{(p.planet.name||"Planet").slice(0,8)}</span>
                     </div>
                   ))}
                 </div>
-                <div className="mobile-drawer-close" onClick={() => setShowMoreDrawer(false)}>▼ CLOSE</div>
+                <div className="mobile-drawer-close" onClick={() => setShowMoreDrawer(false)} tabIndex={0} role="button" data-psg1-focusable="true">▼ CLOSE</div>
               </div>
             </>
           )}
@@ -2357,7 +2763,7 @@ const App: React.FC = () => {
           onClose={() => { setShowLaunchModal(false); setLaunchPrefill(undefined); }}
           onLaunch={handleLaunch}
           txBusy={txBusy}
-          onCheckCoord={(g, s, p) => clientRef.current?.isCoordFree(g, s, p) ?? Promise.resolve(true)}
+          onCheckCoord={checkCoordAvailability}
           prefillTarget={launchPrefill}
         />
       )}

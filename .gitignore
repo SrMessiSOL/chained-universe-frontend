@@ -3,3 +3,9 @@ node_modules/
 dist/
 .env
 test/
+*.apk
+*.aab
+*.aar
+android/.kotlin/
+android/local.properties
+.tmp_research.txt

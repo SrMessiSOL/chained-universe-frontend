@@ -116,6 +116,7 @@ The current frontend uses two related but separate ideas:
 1. Wallet connection
 - used for login, first-time setup, and privileged recovery flows
 - Phantom and Solflare are configured in `src/main.tsx`
+- for Android wallet handoff from the APK, set `VITE_PUBLIC_APP_URL` to the public HTTPS URL that wallets should open in their in-app browser
 
 2. Vault-backed gameplay
 - on first homeworld creation, the app prepares a vault flow for routine gameplay signing

@@ -20,7 +20,7 @@ const VAULT_TARGET_BALANCE_LAMPORTS = 20_000_000;
 const DEFAULT_TX_COMPUTE_UNITS = 250_000;
 const DEFAULT_PRIORITY_FEE_MICROLAMPORTS = 0;
 const VAULT_BACKUP_VERSION = 1;
-const VAULT_RECOVERY_MESSAGE_PREFIX = "Chained Universe vault recovery v1";
+const VAULT_RECOVERY_MESSAGE_PREFIX = "GAMESOL vault recovery v1";
 const VAULT_CACHE_VERSION = 1;
 const VAULT_CACHE_STORAGE_PREFIX = "chained_universe_vault_cache_v1";
 const VAULT_CACHE_DEVICE_KEY_STORAGE = "chained_universe_vault_cache_device_key_v1";
@@ -1911,9 +1911,12 @@ export class GameClient {
 
   async finishBuild(entityPda: PublicKey): Promise<string> {
     await this.ensureVault();
+    const state = await this.loadPlanetStateByPda(entityPda);
+    if (!state || state.planet.buildFinishTs <= 0 || state.planet.buildQueueItem === 255) {
+      return "";
+    }
     const writer = new BorshWriter();
     writer.writeI64(Math.floor(Date.now() / 1000));
-    const state = await this.loadPlanetStateByPda(entityPda);
     const authority = state ? new PublicKey(state.planet.owner) : this.provider.wallet.publicKey;
     return this.sendInstruction(
       [this.buildVaultMutationInstruction(IX.finishBuildVault, IX.finishBuild, entityPda, authority, writer.toBuffer())],
@@ -2343,4 +2346,3 @@ export function energyEfficiency(res: Resources): number {
   if (res.energyConsumption === 0n) return 100;
   return Math.min(100, Number((res.energyProduction * 100n) / res.energyConsumption));
 }
-
