@@ -1,6 +1,9 @@
 node_modules/
 .vercel/
 dist/
+tmp/
+*-vite.log
+*-vite.err.log
 .env
 test/
 *.apk
