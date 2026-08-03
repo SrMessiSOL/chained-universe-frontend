@@ -1,6 +1,6 @@
 ﻿import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Html, Line, OrbitControls, PerspectiveCamera, Stars, Text, useTexture } from "@react-three/drei";
+import { Html, Line, OrbitControls, PerspectiveCamera, Stars, useTexture } from "@react-three/drei";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import * as THREE from "three";
 import { createUniverseSnapshotFromChainData, orbitForSystemPosition, pointOnUniverseOrbit, snapshotFromPublicPlanets, type UniverseMission, type UniverseOrbit, type UniversePlanet, type UniverseSnapshot } from "./universe-data";
@@ -14,10 +14,24 @@ import gamesolMark from "./assets/ui/logobg.png";
 
 const FACTION_COLORS: Record<UniversePlanet["faction"], string> = { owned: "#44f7c3", allied: "#5fa9ff", unknown: "#a8b5c9", hostile: "#ff586d" };
 type ZoomLevel = "universe" | "galaxy" | "system";
+type GraphicsMode = "3d" | "compat";
 const MAX_GALAXY = 999;
 const SYSTEMS_PER_GALAXY = 999;
 const PLANETS_PER_SYSTEM = 15;
 const GALAXY_SECTOR_SIZE = 128;
+
+function detectUniverseGraphicsMode(): GraphicsMode {
+  if (typeof document === "undefined") return "compat";
+  try {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl2", { antialias: false, failIfMajorPerformanceCaveat: true });
+    if (!gl) return "compat";
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    return "3d";
+  } catch {
+    return "compat";
+  }
+}
 
 const GALAXY_COLORS = ["#86d5ff", "#c597ff", "#ffbd72", "#9cf7d4", "#6d8dff", "#ff8bbf"];
 const GALAXY_KINDS = ["spiral", "spiral", "barred", "elliptical"] as const;
@@ -384,7 +398,21 @@ function FleetRoute({ mission, planets }: { mission: UniverseMission; planets: U
   </group>;
 }
 
-function SectorScene({ snapshot, selected, level, fullUniverse, galaxySectorStart, selectedGalaxy, selectedSystem, cameraZoom, galaxyPopulations, systems, onSelect, onEmptySlotSelect, onLevelChange, onGalaxySelect, onSystemSelect, onFullGalaxySelect }: { snapshot: UniverseSnapshot; selected: UniversePlanet; level: ZoomLevel; fullUniverse: boolean; galaxySectorStart: number; selectedGalaxy: number; selectedSystem: number; cameraZoom: { id: number; direction: "in" | "out" }; galaxyPopulations: Map<number, number>; systems: GalaxySystem[]; onSelect: (planet: UniversePlanet) => void; onEmptySlotSelect: (target: { galaxy: number; system: number; position: number }) => void; onLevelChange: (level: ZoomLevel) => void; onGalaxySelect: (galaxy: number) => void; onSystemSelect: (system: number) => void; onFullGalaxySelect: (galaxy: number) => void }) {
+function WebGLContextMonitor({ onContextLost }: { onContextLost: () => void }) {
+  const { gl } = useThree();
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      onContextLost();
+    };
+    canvas.addEventListener("webglcontextlost", handleContextLost);
+    return () => canvas.removeEventListener("webglcontextlost", handleContextLost);
+  }, [gl, onContextLost]);
+  return null;
+}
+
+function SectorScene({ snapshot, selected, level, fullUniverse, galaxySectorStart, selectedGalaxy, selectedSystem, cameraZoom, galaxyPopulations, systems, onSelect, onEmptySlotSelect, onLevelChange, onGalaxySelect, onSystemSelect, onFullGalaxySelect, onContextLost }: { snapshot: UniverseSnapshot; selected: UniversePlanet; level: ZoomLevel; fullUniverse: boolean; galaxySectorStart: number; selectedGalaxy: number; selectedSystem: number; cameraZoom: { id: number; direction: "in" | "out" }; galaxyPopulations: Map<number, number>; systems: GalaxySystem[]; onSelect: (planet: UniversePlanet) => void; onEmptySlotSelect: (target: { galaxy: number; system: number; position: number }) => void; onLevelChange: (level: ZoomLevel) => void; onGalaxySelect: (galaxy: number) => void; onSystemSelect: (system: number) => void; onFullGalaxySelect: (galaxy: number) => void; onContextLost: () => void }) {
   const galaxies = useMemo(() => buildGalaxySector(galaxySectorStart, galaxyPopulations), [galaxySectorStart, galaxyPopulations]);
   const cameraPosition: [number, number, number] = fullUniverse ? [0, 30, 2050] : level === "universe" ? [0, 18, 190] : level === "galaxy" ? [0, 14, 94] : [0, 8, 74];
   // The global map is bounded, but players can still approach any region of it.
@@ -393,18 +421,19 @@ function SectorScene({ snapshot, selected, level, fullUniverse, galaxySectorStar
   const targetLimit = level === "universe" ? (fullUniverse ? 1200 : 80) : level === "galaxy" ? 38 : 16;
   const controls = useRef<any>(null);
   return <Canvas key={`${level}-${fullUniverse ? "all" : "sector"}-${galaxySectorStart}-${selectedGalaxy}`} dpr={[1, 2]} gl={{ antialias: true }} onCreated={({ gl }) => gl.setClearColor("#02050d")}>
+    <WebGLContextMonitor onContextLost={onContextLost} />
     <PerspectiveCamera makeDefault position={cameraPosition} fov={fullUniverse ? 46 : level === "universe" ? 44 : 42} />
     <ambientLight intensity={0.42} /><pointLight position={[0, 0, 0]} color="#51bfff" intensity={22} distance={26} />
     <pointLight position={[-8, 4, 6]} color="#ff6a38" intensity={6} distance={16} />
     {level === "universe" && fullUniverse ? <DeepUniverseStarfield /> : <Stars radius={170} depth={90} count={10500} factor={3.6} saturation={0.14} fade speed={0.25} />}
     {level === "universe" && <>
       {fullUniverse ? <FullUniverseOverview populations={galaxyPopulations} onSelect={onFullGalaxySelect} /> : galaxies.map((galaxy) => <GalaxyNode key={galaxy.id} galaxy={galaxy} selected={galaxy.id === `g-${selectedGalaxy}`} onSelect={() => { onGalaxySelect(Number(galaxy.label)); onLevelChange("galaxy"); }} />)}
-      <Text position={[0, -12, 0]} fontSize={0.7} color="#8be5ff" anchorX="center">PUBLIC UNIVERSE - ALL KNOWN GALAXIES</Text>
+      <Html center position={[0, -12, 0]} style={{ pointerEvents: "none" }}><div className="scene-caption">PUBLIC UNIVERSE - ALL KNOWN GALAXIES</div></Html>
     </>}
     {level === "galaxy" && <>
       <GalaxyBlackHole />
       {systems.map((system) => <SystemNode key={system.id} system={system} onSelect={() => { onSystemSelect(Number(system.label)); onLevelChange("system"); }} />)}
-      <Text position={[0, -6.1, 0]} fontSize={0.42} color="#8be5ff" anchorX="center">{`GALAXY ${selectedGalaxy} - ${SYSTEMS_PER_GALAXY} SYSTEMS - ${systems.filter((system) => system.occupied).length} OCCUPIED`}</Text>
+      <Html center position={[0, -6.1, 0]} style={{ pointerEvents: "none" }}><div className="scene-caption">{`GALAXY ${selectedGalaxy} - ${SYSTEMS_PER_GALAXY} SYSTEMS - ${systems.filter((system) => system.occupied).length} OCCUPIED`}</div></Html>
     </>}
     {level === "system" && <>
       <HeroStar star={starForSystem(selectedGalaxy, selectedSystem)} />
@@ -414,13 +443,47 @@ function SectorScene({ snapshot, selected, level, fullUniverse, galaxySectorStar
         return <React.Fragment key={planet?.id ?? `empty-${position}`}><OrbitPath orbit={orbit} />{planet ? <PlanetNode planet={planet} active={selected.id === planet.id} onSelect={() => onSelect(planet)} /> : <EmptyPlanetSlot position={position} orbit={orbit} onSelect={() => onEmptySlotSelect({ galaxy: selectedGalaxy, system: selectedSystem, position })} />}</React.Fragment>;
       })}
       {snapshot.missions.map((mission) => <FleetRoute key={mission.id} mission={mission} planets={snapshot.planets} />)}
-      <Text position={[0, -3.1, 0]} fontSize={0.34} color="#8be5ff" anchorX="center">{`GALAXY ${selectedGalaxy} - SYSTEM ${selectedSystem} - ${starForSystem(selectedGalaxy, selectedSystem).label.toUpperCase()}`}</Text>
+      <Html center position={[0, -3.1, 0]} style={{ pointerEvents: "none" }}><div className="scene-caption">{`GALAXY ${selectedGalaxy} - SYSTEM ${selectedSystem} - ${starForSystem(selectedGalaxy, selectedSystem).label.toUpperCase()}`}</div></Html>
     </>}
     <OrbitControls ref={controls} enablePan enableDamping dampingFactor={0.08} minDistance={cameraMinDistance} maxDistance={cameraMaxDistance} maxPolarAngle={Math.PI * 0.82} minPolarAngle={Math.PI * 0.22} autoRotate={false} />
     <CenteredUniverseCamera controls={controls} enabled={level === "universe" && fullUniverse} />
     <BoundedCameraTarget controls={controls} limit={targetLimit} />
     <CameraZoom command={cameraZoom} controls={controls} minDistance={cameraMinDistance} maxDistance={cameraMaxDistance} />
   </Canvas>;
+}
+
+function CompatibilityUniverseScene({ snapshot, level, selectedGalaxy, selectedSystem, galaxyPopulations, systems, onSelect, onEmptySlotSelect, onLevelChange, onGalaxySelect, onSystemSelect }: { snapshot: UniverseSnapshot; level: ZoomLevel; selectedGalaxy: number; selectedSystem: number; galaxyPopulations: Map<number, number>; systems: GalaxySystem[]; onSelect: (planet: UniversePlanet) => void; onEmptySlotSelect: (target: { galaxy: number; system: number; position: number }) => void; onLevelChange: (level: ZoomLevel) => void; onGalaxySelect: (galaxy: number) => void; onSystemSelect: (system: number) => void }) {
+  const knownGalaxies = useMemo(() => {
+    const galaxies = new Set<number>([selectedGalaxy, ...galaxyPopulations.keys()]);
+    return [...galaxies].sort((a, b) => a - b);
+  }, [galaxyPopulations, selectedGalaxy]);
+  const availableSystems = useMemo(() => {
+    const occupied = systems.filter((system) => system.occupied);
+    const current = systems.find((system) => Number(system.label) === selectedSystem);
+    return current && !occupied.includes(current) ? [current, ...occupied] : occupied;
+  }, [selectedSystem, systems]);
+
+  return <div className="compat-universe" role="region" aria-label="Compatibility universe navigator">
+    <div className="compat-universe-heading"><span>COMPATIBILITY NAVIGATION</span><b>{level.toUpperCase()}</b></div>
+    {level === "universe" && <>
+      <h2>Known galaxies</h2>
+      <p>This device is using the lightweight map. All navigation and planet actions remain available.</p>
+      <div className="compat-grid galaxies">{knownGalaxies.map((galaxy) => <button key={galaxy} className={galaxy === selectedGalaxy ? "is-active" : ""} onClick={() => { onGalaxySelect(galaxy); onLevelChange("galaxy"); }}><span>GALAXY</span><b>{String(galaxy).padStart(3, "0")}</b><small>{galaxyPopulations.get(galaxy) ?? 0} ON-CHAIN WORLDS</small></button>)}</div>
+    </>}
+    {level === "galaxy" && <>
+      <h2>Galaxy {selectedGalaxy}</h2>
+      <p>{availableSystems.filter((system) => system.occupied).length} occupied systems detected. Use the coordinate controls above to visit any other system.</p>
+      <div className="compat-grid systems">{availableSystems.map((system) => <button key={system.id} className={Number(system.label) === selectedSystem ? "is-active" : ""} onClick={() => { onSystemSelect(Number(system.label)); onLevelChange("system"); }}><span>{system.star.label}</span><b>SYSTEM {system.label}</b><small>{system.planetCount} PLANETS</small></button>)}</div>
+    </>}
+    {level === "system" && <>
+      <h2>Galaxy {selectedGalaxy} · System {selectedSystem}</h2>
+      <p>{starForSystem(selectedGalaxy, selectedSystem).label} · Select a planet or an empty position.</p>
+      <div className="compat-orbits">{Array.from({ length: PLANETS_PER_SYSTEM }, (_, index) => index + 1).map((position) => {
+        const planet = snapshot.planets.find((candidate) => Number(candidate.system.split(":")[2]) === position);
+        return <button key={position} className={planet ? `has-planet faction-${planet.faction}` : "is-empty"} onClick={() => planet ? onSelect(planet) : onEmptySlotSelect({ galaxy: selectedGalaxy, system: selectedSystem, position })}><span className="compat-planet-dot" /><span><b>{planet?.name ?? `Empty position ${position}`}</b><small>POSITION {position}{planet ? ` · ${planet.faction.toUpperCase()}` : ""}</small></span><em>{planet ? "SELECT" : "TARGET"}</em></button>;
+      })}</div>
+    </>}
+  </div>;
 }
 
 export default function UniverseLab({ embedded = false, onOpenCommand, onOpenEmptyTarget, ownedPlanets = [], activeOwnedPlanet, onOperatePlanet, initialGalaxy, initialSystem }: { embedded?: boolean; onOpenCommand?: (planet: UniversePlanet) => void; onOpenEmptyTarget?: (target: { galaxy: number; system: number; position: number }) => void; ownedPlanets?: UniverseOwnedPlanet[]; activeOwnedPlanet?: string; onOperatePlanet?: (planet: UniverseOwnedPlanet) => void; initialGalaxy?: number; initialSystem?: number }) {
@@ -437,6 +500,7 @@ export default function UniverseLab({ embedded = false, onOpenCommand, onOpenEmp
   const [cameraZoom, setCameraZoom] = useState<{ id: number; direction: "in" | "out" }>({ id: 0, direction: "in" });
   const [galaxyInput, setGalaxyInput] = useState(String(initialGalaxy ?? 1));
   const [systemInput, setSystemInput] = useState(String(initialSystem ?? 1));
+  const [graphicsMode, setGraphicsMode] = useState<GraphicsMode>(detectUniverseGraphicsMode);
 
   const mapToSnapshot = (chainPlanets: Array<{
     entity: string;
@@ -583,7 +647,7 @@ export default function UniverseLab({ embedded = false, onOpenCommand, onOpenEmp
   if (!snapshot || !selected) return <div className="universe-loading">CALIBRATING NAVIGATION ARRAY</div>;
   return <main className={`universe-lab${embedded ? " embedded" : ""}`}>
     <div className="universe-scene">
-      <Suspense fallback={null}>
+      {graphicsMode === "3d" ? <Suspense fallback={null}>
         <SectorScene
           snapshot={{ ...snapshot, planets: visiblePlanets }}
           selected={selected}
@@ -604,10 +668,26 @@ export default function UniverseLab({ embedded = false, onOpenCommand, onOpenEmp
           onGalaxySelect={setSelectedGalaxy}
           onSystemSelect={setSelectedSystem}
           onFullGalaxySelect={openGalaxyFromOverview}
+          onContextLost={() => setGraphicsMode("compat")}
         />
-      </Suspense>
+      </Suspense> : <CompatibilityUniverseScene
+        snapshot={{ ...snapshot, planets: visiblePlanets }}
+        level={zoomLevel}
+        selectedGalaxy={selectedGalaxy}
+        selectedSystem={selectedSystem}
+        galaxyPopulations={galaxyPopulations}
+        systems={galaxySystems}
+        onSelect={(planet) => {
+          setSelected(planet);
+          onOpenCommand?.(planet);
+        }}
+        onEmptySlotSelect={(target) => onOpenEmptyTarget?.(target)}
+        onLevelChange={setZoomLevel}
+        onGalaxySelect={setSelectedGalaxy}
+        onSystemSelect={setSelectedSystem}
+      />}
     </div>
-    <header className="universe-topbar"><a href="/" className="universe-brand" aria-label="GAMESOL home"><img src={gamesolMark} alt="GAMESOL" /></a><div className="zoom-controls"><button className="camera-zoom" onClick={() => setCameraZoom(({ id }) => ({ id: id + 1, direction: "out" }))} aria-label="Zoom camera out">−</button><button className="camera-zoom" onClick={() => setCameraZoom(({ id }) => ({ id: id + 1, direction: "in" }))} aria-label="Zoom camera in">+</button><div className="coordinate-jump"><input aria-label="Galaxy number" inputMode="numeric" value={galaxyInput} onChange={(event) => setGalaxyInput(event.target.value)} /><span>:</span><input aria-label="System number" inputMode="numeric" value={systemInput} onChange={(event) => setSystemInput(event.target.value)} /><button onClick={visitCoordinates}>GO</button></div><button disabled={zoomLevel === "universe"} onClick={() => setZoomLevel(zoomLevel === "system" ? "galaxy" : "universe")}>LEVEL OUT</button><b>{zoomLevel.toUpperCase()}</b><button disabled={zoomLevel === "system"} onClick={() => setZoomLevel(zoomLevel === "universe" ? "galaxy" : "system")}>LEVEL IN</button>{ownedPlanets.length > 0 && <button onClick={() => setHudOpen(!hudOpen)}>{hudOpen ? "HIDE PLANETS" : "SHOW PLANETS"}</button>}</div></header>
+    <header className="universe-topbar"><a href="/" className="universe-brand" aria-label="GAMESOL home"><img src={gamesolMark} alt="GAMESOL" /></a><div className="zoom-controls"><button className="camera-zoom" disabled={graphicsMode === "compat"} onClick={() => setCameraZoom(({ id }) => ({ id: id + 1, direction: "out" }))} aria-label="Zoom camera out">−</button><button className="camera-zoom" disabled={graphicsMode === "compat"} onClick={() => setCameraZoom(({ id }) => ({ id: id + 1, direction: "in" }))} aria-label="Zoom camera in">+</button><div className="coordinate-jump"><input aria-label="Galaxy number" inputMode="numeric" value={galaxyInput} onChange={(event) => setGalaxyInput(event.target.value)} /><span>:</span><input aria-label="System number" inputMode="numeric" value={systemInput} onChange={(event) => setSystemInput(event.target.value)} /><button onClick={visitCoordinates}>GO</button></div><button disabled={zoomLevel === "universe"} onClick={() => setZoomLevel(zoomLevel === "system" ? "galaxy" : "universe")}>LEVEL OUT</button><b>{graphicsMode === "compat" ? `COMPAT · ${zoomLevel.toUpperCase()}` : zoomLevel.toUpperCase()}</b><button disabled={zoomLevel === "system"} onClick={() => setZoomLevel(zoomLevel === "universe" ? "galaxy" : "system")}>LEVEL IN</button>{ownedPlanets.length > 0 && <button onClick={() => setHudOpen(!hudOpen)}>{hudOpen ? "HIDE PLANETS" : "SHOW PLANETS"}</button>}</div></header>
     {ownedPlanets.length > 0 && <aside className={`universe-intel ${hudOpen ? "" : "is-hidden"}`}><div className="intel-kicker">COMMAND NETWORK</div><div className="roster-heading"><div><h1>Your planets</h1><p>{ownedPlanets.length} worlds under your control</p></div><b>{ownedPlanets.length}</b></div>{activePlanet && <button className="visit-active-system" onClick={() => { setSelectedGalaxy(activePlanet.galaxy); setSelectedSystem(activePlanet.system); setGalaxyInput(String(activePlanet.galaxy)); setSystemInput(String(activePlanet.system)); setZoomLevel("system"); }}>VISIT ACTIVE SYSTEM</button>}<div className="owned-planet-roster">{ownedPlanets.map((planet, index) => <button className={planet.entity === activeOwnedPlanet ? "is-active" : ""} key={planet.entity} onClick={() => onOperatePlanet?.(planet)}><span className="roster-index">{String(index + 1).padStart(2, "0")}</span><span className="roster-planet"><b>{planet.name}</b><small>G {planet.galaxy} · S {planet.system} · P {planet.position}</small></span><em>{planet.entity === activeOwnedPlanet ? "ACTIVE" : "OPERATE"}</em></button>)}</div></aside>}
   </main>;
 }
